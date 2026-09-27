@@ -706,40 +706,150 @@ function registerAuth(app) {
     await audit(u.id, isDemo ? "login-demo" : "login", "session");
     res.json(await startSession(u, res, isDemo ? { alias: email, pin: password } : null));
   });
+  app.post("/api/auth/reset-password", async (req, res) => {
+    const raw = String(req.body?.resetToken || "");
+    const password = String(req.body?.password || "");
+    if (!/^[A-Za-z0-9_-]{40,100}$/.test(raw) || !passwordValid(password))
+      return issue(res, "C\xF3digo inv\xE1lido o contrase\xF1a de menos de 12 caracteres");
+    try {
+      const changed = await db.transaction(async () => {
+        const reset = await row(`DELETE FROM app_invites
+                    WHERE tokenHash=? AND role IN ('recovery','password-reset') AND expiresAt>?
+                    RETURNING email,role,createdBy`, hash(raw), now());
+        if (!reset) return false;
+        const u = await row("SELECT id,active FROM app_users WHERE email=?", reset.email);
+        if (!u?.active) return false;
+        await run("UPDATE app_users SET passwordHash=? WHERE id=?", hashPassword(password), u.id);
+        await run("DELETE FROM app_sessions WHERE userId=?", u.id);
+        await run("DELETE FROM app_downloads WHERE userId=?", u.id);
+        await run("DELETE FROM app_invites WHERE email=? AND role IN ('recovery','password-reset')", reset.email);
+        await audit(u.id, "password-reset", reset.role === "recovery" ? "personal-code" : `manager:${reset.createdBy}`);
+        return true;
+      })();
+      if (!changed) return issue(res, "C\xF3digo caducado, usado o cuenta revocada", 400);
+      res.clearCookie(cookieName, { path: "/", secure: process.env.NODE_ENV === "production", sameSite: "lax" });
+      res.json({ ok: true });
+    } catch {
+      return issue(res, "No se pudo restablecer la contrase\xF1a", 500);
+    }
+  });
   app.get("/api/auth/me", requireAuth, (req, res) => res.json({ user: req.currentUser }));
   app.post("/api/auth/logout", requireAuth, async (req, res) => {
     await run("DELETE FROM app_sessions WHERE tokenHash=?", hash(incomingToken(req)));
-    res.clearCookie(cookieName, { path: "/" });
+    res.clearCookie(cookieName, { path: "/", secure: process.env.NODE_ENV === "production", sameSite: "lax" });
     res.json({ ok: true });
   });
   app.get("/api/auth/users", requireAuth, allow("gerencia"), async (_req, res) => {
     res.json((await rows("SELECT id,email,role,active,createdAt FROM app_users ORDER BY id")).map((u) => ({ ...u, active: !!u.active })));
+  });
+  app.post("/api/auth/recovery-code", requireAuth, async (req, res) => {
+    const password = String(req.body?.password || "");
+    const u = await row("SELECT * FROM app_users WHERE id=? AND active=1", req.currentUser.id);
+    if (!u || !checkPassword(password, u.passwordHash))
+      return issue(res, "Contrase\xF1a actual incorrecta", 403);
+    const raw = token();
+    const expiresAt = now() + 180 * 24 * 60 * 6e4;
+    await db.transaction(async () => {
+      await run("DELETE FROM app_invites WHERE email=? AND role='recovery'", u.email);
+      await run(
+        "INSERT INTO app_invites (tokenHash,email,role,expiresAt,createdBy) VALUES (?,?,?,?,?)",
+        hash(raw),
+        u.email,
+        "recovery",
+        expiresAt,
+        u.id
+      );
+      await audit(u.id, "recovery-code-create", u.email);
+    })();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ code: raw, expiresAt });
+  });
+  app.post("/api/auth/users/:id/reset-link", requireAuth, allow("gerencia"), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1 || id === req.currentUser.id)
+      return issue(res, "Para tu propia cuenta usa el c\xF3digo personal");
+    const u = await row("SELECT id,email FROM app_users WHERE id=? AND active=1", id);
+    if (!u) return issue(res, "La cuenta no est\xE1 activa", 404);
+    const raw = token();
+    const expiresAt = now() + 24 * 60 * 6e4;
+    await db.transaction(async () => {
+      await run("DELETE FROM app_invites WHERE email=? AND role='password-reset'", u.email);
+      await run(
+        "INSERT INTO app_invites (tokenHash,email,role,expiresAt,createdBy) VALUES (?,?,?,?,?)",
+        hash(raw),
+        u.email,
+        "password-reset",
+        expiresAt,
+        req.currentUser.id
+      );
+      await audit(req.currentUser.id, "password-reset-link-create", u.email);
+    })();
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ username: u.email, resetToken: raw, expiresAt });
+  });
+  app.post("/api/auth/users/:id/revoke", requireAuth, allow("gerencia"), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1 || id === req.currentUser.id)
+      return issue(res, "No puedes revocar tu propio acceso");
+    try {
+      const revoked = await db.transaction(async () => {
+        const u = await row("SELECT id,email,active FROM app_users WHERE id=?", id);
+        if (!u?.active) return false;
+        await run("UPDATE app_users SET active=0 WHERE id=?", id);
+        await run("DELETE FROM app_sessions WHERE userId=?", id);
+        await run("DELETE FROM app_downloads WHERE userId=?", id);
+        await run("DELETE FROM app_invites WHERE email=?", u.email);
+        await audit(req.currentUser.id, "access-revoked", u.email);
+        return true;
+      })();
+      if (!revoked) return issue(res, "La cuenta no existe o ya fue revocada", 404);
+      res.json({ ok: true });
+    } catch {
+      return issue(res, "No se pudo revocar el acceso", 500);
+    }
   });
   app.post("/api/auth/invite", requireAuth, allow("gerencia"), async (req, res) => {
     const email = String(req.body.username || req.body.email || "").trim().toLowerCase();
     const role = String(req.body.role || "");
     if (!usernameValid(email) || !["produccion", "administracion", "gerencia"].includes(role))
       return issue(res, "Usuario o rol inv\xE1lidos");
-    if (await row("SELECT id FROM app_users WHERE email=?", email))
-      return issue(res, "Esa cuenta ya existe", 409);
+    const existing = await row("SELECT id,role,active FROM app_users WHERE email=?", email);
+    if (existing?.active) return issue(res, "Esa cuenta ya existe", 409);
+    if (existing && existing.role !== role)
+      return issue(res, "Para reactivar una cuenta conserva su rol anterior", 409);
     const raw = token();
-    await run("DELETE FROM app_invites WHERE email=?", email);
-    await run("INSERT INTO app_invites (tokenHash,email,role,expiresAt,createdBy) VALUES (?,?,?,?,?)", hash(raw), email, role, now() + 24 * 60 * 6e4, req.currentUser.id);
-    await audit(req.currentUser.id, "invite", email);
+    await db.transaction(async () => {
+      await run("DELETE FROM app_invites WHERE email=? AND role NOT IN ('recovery','password-reset')", email);
+      await run("INSERT INTO app_invites (tokenHash,email,role,expiresAt,createdBy) VALUES (?,?,?,?,?)", hash(raw), email, role, now() + 24 * 60 * 6e4, req.currentUser.id);
+      await audit(req.currentUser.id, existing ? "reactivation-invite" : "invite", email);
+    })();
     res.json({ email, role, inviteToken: raw, expiresAt: now() + 24 * 60 * 6e4 });
   });
   app.post("/api/auth/accept", async (req, res) => {
     const raw = String(req.body.inviteToken || ""), password = String(req.body.password || "");
     const invite = await row("SELECT * FROM app_invites WHERE tokenHash=? AND expiresAt>?", hash(raw), now());
-    if (!invite || !passwordValid(password))
+    if (!invite || !["produccion", "administracion", "gerencia"].includes(invite.role) || !passwordValid(password))
       return issue(res, "Invitaci\xF3n inv\xE1lida o clave de menos de 12 caracteres");
-    const u = await db.transaction(async () => {
-      const id = Number((await run("INSERT INTO app_users (email,role,passwordHash,createdAt) VALUES (?,?,?,?)", invite.email, invite.role, hashPassword(password), (/* @__PURE__ */ new Date()).toISOString())).lastInsertRowid);
-      await run("DELETE FROM app_invites WHERE tokenHash=?", hash(raw));
-      await audit(id, "accept-invite", invite.email);
-      return await row("SELECT * FROM app_users WHERE id=?", id);
-    })();
-    res.json(await startSession(u, res));
+    try {
+      const u = await db.transaction(async () => {
+        const valid = await row("DELETE FROM app_invites WHERE tokenHash=? AND expiresAt>? RETURNING email,role", hash(raw), now());
+        if (!valid || !["produccion", "administracion", "gerencia"].includes(valid.role))
+          throw new Error("Invitaci\xF3n ya utilizada");
+        const existing = await row("SELECT id,role,active FROM app_users WHERE email=?", valid.email);
+        if (existing?.active || existing && existing.role !== valid.role)
+          throw new Error("La cuenta ya est\xE1 activa o cambi\xF3 de rol");
+        const id = existing ? existing.id : Number((await run("INSERT INTO app_users (email,role,passwordHash,createdAt) VALUES (?,?,?,?)", valid.email, valid.role, hashPassword(password), (/* @__PURE__ */ new Date()).toISOString())).lastInsertRowid);
+        if (existing) {
+          await run("UPDATE app_users SET active=1,passwordHash=? WHERE id=?", hashPassword(password), id);
+          await run("DELETE FROM app_sessions WHERE userId=?", id);
+        }
+        await audit(id, existing ? "access-reactivated" : "accept-invite", valid.email);
+        return await row("SELECT * FROM app_users WHERE id=?", id);
+      })();
+      res.json(await startSession(u, res));
+    } catch {
+      return issue(res, "Invitaci\xF3n utilizada o cuenta ya activa", 409);
+    }
   });
   app.post("/api/auth/download-ticket", requireAuth, async (req, res) => {
     const path = String(req.body.path || "");

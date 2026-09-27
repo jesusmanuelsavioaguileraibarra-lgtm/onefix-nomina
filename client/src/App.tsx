@@ -14,6 +14,7 @@ import Receivables from "./Receivables";
 
 type State = { people:any[]; projects:any[]; contracts:any[]; tasks:any[]; attendance:any[]; attendanceConflicts:any[]; dailyPays:any[]; deductions:any[]; payrolls:Payroll[]; amendments:any[]; absenceAdjustments:{personId:number;weekStart:string;amount:number}[] };
 type User = {id:number;email:string;role:"produccion"|"administracion"|"gerencia"};
+type AccessUser = User & {active:boolean;createdAt:string};
 const previewOnly=import.meta.env.VITE_PREVIEW_MODE==="1";
 const usd = (n:number) => new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(n || 0);
 const day = () => new Date().toLocaleDateString("en-CA",{timeZone:"America/New_York"});
@@ -43,9 +44,9 @@ const nav = [
 ] as const;
 type Tab = typeof nav[number]["key"] | "accesos";
 type Modal = "persona"|"editarPersona"|"obra"|"contrato"|"tarea"|"asistencia"|"jornal"|"descuento"|"ampliacion"|"pago"|null;
-function Field({label,name,type="text",required=false,disabled=false,placeholder="",min,minLength,maxLength,step,list,children,defaultValue,className="",value,onChange,onInvalid,onInput,readOnly=false}:any) {
+function Field({label,name,type="text",required=false,disabled=false,placeholder="",min,minLength,maxLength,step,list,children,defaultValue,className="",value,onChange,onInvalid,onInput,readOnly=false,autoComplete}:any) {
   return <label className={`field ${className}`}><span>{label}</span>{children ? <select name={name} required={required} disabled={disabled} defaultValue={value === undefined ? defaultValue ?? "" : undefined} value={value} onChange={onChange} data-testid={`input-${name}`}><option value="" disabled>Seleccionar</option>{children}</select> :
-    <input name={name} type={type} required={required} disabled={disabled} placeholder={placeholder} min={min} minLength={minLength} maxLength={maxLength} step={step} list={list} defaultValue={value === undefined ? defaultValue : undefined} value={value} onChange={onChange} onInvalid={onInvalid} onInput={onInput} readOnly={readOnly} data-testid={`input-${name}`} />}</label>;
+    <input name={name} type={type} required={required} disabled={disabled} placeholder={placeholder} min={min} minLength={minLength} maxLength={maxLength} step={step} list={list} autoComplete={autoComplete} defaultValue={value === undefined ? defaultValue : undefined} value={value} onChange={onChange} onInvalid={onInvalid} onInput={onInput} readOnly={readOnly} data-testid={`input-${name}`} />}</label>;
 }
 function AttendanceFields({a,people,projects,onValidationError,onValidationInput}:{a:any;people:any[];projects:any[];onValidationError:(message:string)=>void;onValidationInput:()=>void}) {
   const previousSplits=Array.isArray(a?.allocations)?a.allocations:[];
@@ -114,18 +115,18 @@ function Empty({title,description,action,onClick}:any) {
 }
 function Badge({value}: {value:string}) { return <span className={`badge ${value === "aprobado" || value === "Pagado" ? "good":value === "revisado" || value === "Pendiente" ? "warm":""}`}>{value}</span>; }
 function AuthGate() {
-  const {data:session,isLoading,isError:sessionError,refetch}=useQuery<{user:User;offline?:boolean}|null>({queryKey:["/api/auth/me"],queryFn:async()=>{
+  const {data:session,isLoading,isError:sessionError,refetch}=useQuery<{user:User;offline?:boolean}|null>({queryKey:["/api/auth/me"],refetchInterval:60000,refetchOnWindowFocus:true,queryFn:async()=>{
     try{return await (await apiRequest("GET","/api/auth/me")).json();}
     catch(e){
       if(String(e).startsWith("Error: 401:"))return null;
-      if(!navigator.onLine){const saved=await loadLocal<{user:User}>("session").catch(()=>undefined);if(saved?.user?.role==="produccion")return {...saved,offline:true};}
+      if(!navigator.onLine){const saved=await loadLocal<{user:User;savedAt:string}>("session").catch(()=>undefined);if(saved?.user?.role==="produccion"&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000)return {...saved,offline:true};}
       throw e;
     }
   }});
   const {data:status,isError:statusError,refetch:retryStatus}=useQuery<{hasUsers:boolean;setupAvailable:boolean;demoAccess:boolean;demoRoles:User["role"][];personnelIntake?:boolean}>({queryKey:["/api/auth/status"],queryFn:async()=>{
     try{return await (await apiRequest("GET","/api/auth/status")).json();}
     catch(e){
-      if(!navigator.onLine && (await loadLocal<{user:User}>("session").catch(()=>undefined))?.user?.role==="produccion")
+      if(!navigator.onLine && await loadLocal<{user:User;savedAt:string}>("session").then(saved=>saved?.user?.role==="produccion"&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000).catch(()=>false))
         return {hasUsers:true,setupAvailable:false,demoAccess:false,demoRoles:[],personnelIntake:true};
       throw e;
     }
@@ -134,6 +135,20 @@ function AuthGate() {
   const [busy,setBusy]=useState(false);
   const [unlocked,setUnlocked]=useState(false);
   const invite=new URLSearchParams(location.search).get("invite");
+  const resetToken=new URLSearchParams(location.search).get("reset");
+  const [resetMode,setResetMode]=useState(!!resetToken);
+  const [resetDone,setResetDone]=useState(false);
+  const [localCacheWarning,setLocalCacheWarning]=useState("");
+  async function resetPassword(e:React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();setError("");setBusy(true);
+    const f=new FormData(e.currentTarget);
+    if(f.get("password")!==f.get("confirmPassword")) {setError("Las contraseñas no coinciden.");setBusy(false);return;}
+    try {
+      await apiRequest("POST","/api/auth/reset-password",{resetToken:resetToken||f.get("resetToken"),password:f.get("password")});
+      setResetDone(true);setResetMode(false);history.replaceState(null,"",location.pathname+location.hash);
+    } catch(e:any){setError(e.message||"No se pudo restablecer la contraseña.");}
+    finally {setBusy(false);}
+  }
   async function submit(e:React.FormEvent<HTMLFormElement>) {
     e.preventDefault();setError("");setBusy(true);
     const f=new FormData(e.currentTarget);
@@ -145,8 +160,14 @@ function AuthGate() {
       const result=await response.json();
       setAuthToken(result.token);
       if(result.user.role==="produccion") {
-        await unlockOffline(result.user.id,String(f.get("password")),true);
-        await saveLocal("session",{user:result.user});
+        try {
+          await unlockOffline(result.user.id,String(f.get("password")),true);
+          await saveLocal("session",{user:result.user,savedAt:new Date().toISOString()});
+          setLocalCacheWarning("");
+        } catch {
+          await removeLocal("session").catch(()=>{});
+          setLocalCacheWarning("Iniciaste sesión en línea. La copia cifrada anterior no se puede abrir con esta contraseña; conserva el dispositivo y consulta a Administración si tenía asistencias pendientes. El acceso sin conexión está desactivado hasta resolver esa copia.");
+        }
         setUnlocked(true);
       } else await removeLocal("session").catch(()=>{});
       queryClient.removeQueries({queryKey:["/api/state"]});await refetch();
@@ -161,21 +182,37 @@ function AuthGate() {
         const check=await (await apiRequest("POST","/api/auth/login",{username:session?.user.email,password:pin})).json();
         setAuthToken(check.token);
       }
-      await unlockOffline(session!.user.id,pin,false);setUnlocked(true);
+      try {
+        await unlockOffline(session!.user.id,pin,false);
+        if(!session?.offline)await saveLocal("session",{user:session!.user,savedAt:new Date().toISOString()});
+        setLocalCacheWarning("");
+      } catch(e) {
+        if(session?.offline)throw e;
+        await removeLocal("session").catch(()=>{});
+        setLocalCacheWarning("Acceso en línea confirmado. La copia cifrada anterior no se abrió; conserva el dispositivo si contiene asistencias pendientes. Sin conexión no estará disponible.");
+      }
+      setUnlocked(true);
     } catch(e:any) {setError(e.message||"No se pudo abrir la copia cifrada.");}
     finally {setBusy(false);}
   }
   if (isLoading) return <div className="auth-page"><div className="auth-card"><p>Cargando acceso seguro…</p></div></div>;
   if (sessionError || statusError) return <div className="auth-page"><div className="auth-card"><h1>Sin conexión al servidor</h1><p>La carga de empleados requiere conexión. Si ya activaste la copia local de Producción, desconecta el dispositivo y reintenta para registrar asistencia.</p><button className="btn primary wide" type="button" onClick={()=>{refetch();retryStatus();}}>Reintentar conexión</button></div></div>;
   if (!status) return <div className="auth-page"><div className="auth-card"><p>Verificando el modo de operación…</p></div></div>;
-  if(session?.user?.role==="produccion" && (!unlocked || !offlineUnlocked(session.user.id)))
+  if(session?.user?.role==="produccion" && (!unlocked || (session.offline&&!offlineUnlocked(session.user.id))))
     return <div className="auth-page"><section className="auth-card"><h1>Desbloquear asistencia local</h1><p>{session.offline?"Sin conexión. Ingresa tu contraseña personal para abrir la copia cifrada de este dispositivo.":"Ingresa tu contraseña para habilitar la copia local de Producción."}</p><form onSubmit={unlockSession}><Field label="Contraseña de Producción" name="pin" type="password" required minLength={status.personnelIntake?12:4}/>{error&&<div className="feedback error" role="alert">{error}</div>}<button className="btn primary wide" disabled={busy}>{busy?"Comprobando…":"Desbloquear"}</button></form><small>La copia local solo incluye nombres mínimos y asistencia. Se cifra en este dispositivo; nómina y pagos permanecen bloqueados.</small></section></div>;
-  if(session?.user) return <AppBody user={session.user} personnelIntake={!!status?.personnelIntake} offlineSession={!!session.offline} onLogout={async()=>{if(navigator.onLine)await apiRequest("POST","/api/auth/logout").catch(()=>{});await removeLocal("session").catch(()=>{});lockOffline();setUnlocked(false);setAuthToken("");queryClient.clear();await refetch();}}/>;
+  if(session?.user) return <AppBody user={session.user} personnelIntake={!!status?.personnelIntake} offlineSession={!!session.offline} localCacheWarning={localCacheWarning} onLogout={async()=>{if(navigator.onLine)await apiRequest("POST","/api/auth/logout").catch(()=>{});await removeLocal("session").catch(()=>{});lockOffline();setUnlocked(false);setAuthToken("");queryClient.clear();await refetch();}}/>;
   return <div className="auth-page"><section className="auth-card">
     <div className="brand"><svg aria-label="ONEFIX" viewBox="0 0 40 40" width="38" height="38" fill="none"><path d="M20 3L35 12V28L20 37L5 28V12L20 3Z" stroke="currentColor" strokeWidth="2.5"/><path d="M12 20H28M20 12V28" stroke="currentColor" strokeWidth="3.5"/></svg><span><strong>ONEFIX</strong><small>OPERACIONES</small></span></div>
     <span className="eyebrow">CENTRO DE NÓMINA · {status?.personnelIntake?"OPERACIÓN REAL":"BETA"}</span>
-    <h1>{invite?"Aceptar invitación":status?.hasUsers?"Iniciar sesión":"Instalación inicial"}</h1>
-    <p>{invite?"Crea tu clave personal de al menos 12 caracteres.":status?.hasUsers?"Acceso limitado al equipo de Producción, Administración y Gerencia.":"Gerencia crea la primera cuenta; después invita al resto del equipo."}</p>
+    <h1>{resetMode?"Restablecer contraseña":invite?"Aceptar invitación":status?.hasUsers?"Iniciar sesión":"Instalación inicial"}</h1>
+    <p>{resetMode?"Usa tu código personal de recuperación o el enlace de un solo uso que te entregó Gerencia.":invite?"Crea tu clave personal de al menos 12 caracteres.":status?.hasUsers?"Acceso limitado al equipo de Producción, Administración y Gerencia.":"Gerencia crea la primera cuenta; después invita al resto del equipo."}</p>
+    {resetMode?<><form onSubmit={resetPassword}>
+      {!resetToken&&<Field label="Código de recuperación" name="resetToken" required autoComplete="off" placeholder="Pega aquí el código de un solo uso"/>}
+      <Field label="Nueva contraseña (mínimo 12 caracteres)" name="password" type="password" required minLength={12} maxLength={128}/>
+      <Field label="Confirmar nueva contraseña" name="confirmPassword" type="password" required minLength={12} maxLength={128}/>
+      {error&&<div className="feedback error" role="alert">{error}</div>}
+      <button className="btn primary wide" disabled={busy} data-testid="button-reset-password">{busy?"Restableciendo…":"Restablecer contraseña"}</button>
+    </form><button className="text-link auth-secondary" type="button" onClick={()=>{setResetMode(false);setError("");history.replaceState(null,"",location.pathname+location.hash);}}>Volver al inicio de sesión</button><small>Al restablecerla se cierran todas las sesiones anteriores. Guarda tu nuevo código personal después de entrar.</small></>:<>
     {!invite&&status?.demoAccess&&<div className="demo-access-note"><strong>Accesos de prueba por área</strong><div className="demo-role-list">{(["gerencia","administracion","produccion"] as const).filter(role=>status.demoRoles.includes(role)).map(role=><div key={role}><span>{role==="gerencia"?"Gerencia":role==="administracion"?"Administración":"Producción"}</span><code>{role}</code></div>)}</div><small>Ingresa la clave de cuatro dígitos asignada a tu área. Solo datos ficticios; no utilizar con nóminas reales.</small></div>}
     {!status?.hasUsers&&!invite&&!status?.setupAvailable?<div className="feedback error">Falta configurar el código de instalación en el servidor. No hay acceso público.</div>:
       <form onSubmit={submit}>
@@ -184,11 +221,14 @@ function AuthGate() {
         {!status?.hasUsers&&!invite&&<Field label="Código privado de instalación" name="setupToken" type="password" required/>}
         {error&&<div className="feedback error" role="alert">{error}</div>}
         <button className="btn primary wide" type="submit" disabled={busy} data-testid="button-auth">{busy?"Verificando…":invite?"Activar cuenta":status?.hasUsers?"Entrar":"Crear cuenta de Gerencia"}</button>
-      </form>}
+      </form>}</>}
+    {!resetMode&&resetDone&&<div className="feedback success" role="status">Contraseña actualizada. Inicia sesión con la nueva clave.</div>}
+    {!resetMode&&status?.hasUsers&&!invite&&<button type="button" className="text-link auth-secondary" onClick={()=>{setResetMode(true);setResetDone(false);setError("");}} data-testid="button-forgot-password">Olvidé mi contraseña</button>}
+    {!resetMode&&status?.hasUsers&&!invite&&<small>Si no tienes un código personal, pide a Gerencia un enlace temporal. Gerencia debe conservar su propio código de recuperación.</small>}
     <small>{status?.personnelIntake?"Producción registra empleados y asistencia. Administración o Gerencia pueden generar la nómina; Administración revisa cada partida, Gerencia aprueba y Administración registra los pagos confirmados, solo con conexión.":"Solo datos ficticios durante esta beta. No usar para pagos reales."}</small>
   </section></div>;
 }
-function AppBody({user,onLogout,offlineSession,personnelIntake}:{user:User;onLogout:()=>Promise<void>;offlineSession:boolean;personnelIntake:boolean}) {
+function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning}:{user:User;onLogout:()=>Promise<void>;offlineSession:boolean;personnelIntake:boolean;localCacheWarning:string}) {
   const loadingDay = initialLoadOnly();
   const [tab,setTab] = useState<Tab>(personnelIntake ? user.role==="gerencia"?"accesos":user.role==="produccion"?"produccion":"personas" : loadingDay && user.role!=="gerencia" ? "personas" :user.role==="produccion"?"produccion":"inicio");
   const [modal,setModal] = useState<Modal>(null);
@@ -206,13 +246,16 @@ function AppBody({user,onLogout,offlineSession,personnelIntake}:{user:User;onLog
   const [week,setWeek] = useState(()=>latestReadySaturday(day()));
   const selectedPeriod = (()=>{try{return payrollPeriod(week);}catch{return null;}})();
   const [inviteResult,setInviteResult]=useState("");
+  const [resetLinkResult,setResetLinkResult]=useState("");
+  const [recoveryResult,setRecoveryResult]=useState("");
+  const [showRecovery,setShowRecovery]=useState(false);
   const [offline,setOffline]=useState(offlineSession || !navigator.onLine);
   const [queue,setQueue]=useState<QueuedPayment[]>([]);
   const [attendanceQueue,setAttendanceQueue]=useState<QueuedAttendance[]>([]);
   const syncingAttendance=useRef(false);
   const [attendanceVersions,setAttendanceVersions]=useState<Record<string,number>>({});
   const production=user.role==="produccion",admin=user.role==="administracion",manager=user.role==="gerencia";
-  const {data:users=[]}=useQuery<User[]>({queryKey:["/api/auth/users"],enabled:manager});
+  const {data:users=[]}=useQuery<AccessUser[]>({queryKey:["/api/auth/users"],enabled:manager});
   const visibleNav=nav.filter(n=>{
     if(n.key==="seguimiento"||n.key==="cobros")return !production;
     if(personnelIntake){
@@ -227,7 +270,7 @@ function AppBody({user,onLogout,offlineSession,personnelIntake}:{user:User;onLog
     try {
       const state=await (await apiRequest("GET","/api/state")).json() as State;
       removeLocal(`state-${user.id}`).catch(()=>{});
-      if(production) {
+      if(production&&offlineUnlocked(user.id)) {
         const minimal:State={people:state.people.filter(p=>p.kind==="empleado").map(p=>({id:p.id,name:p.name,kind:p.kind,payType:p.payType,active:p.active})),
           projects:state.projects.map(p=>({id:p.id,name:p.name})),attendance:state.attendance,
           attendanceConflicts:[],contracts:[],tasks:[],dailyPays:[],deductions:[],payrolls:[],amendments:[],absenceAdjustments:[]};
@@ -258,7 +301,7 @@ function AppBody({user,onLogout,offlineSession,personnelIntake}:{user:User;onLog
     };
     window.addEventListener("online",reconnect);window.addEventListener("offline",update);
     if(!personnelIntake)listPayments().then(items=>setQueue(items.filter(p=>p.userId===user.id))).catch(()=>{});
-    if(production)listAttendance(user.id).then(items=>{setAttendanceQueue(items);if(navigator.onLine)syncAttendance().catch(()=>{});}).catch(()=>{});
+    if(production&&offlineUnlocked(user.id))listAttendance(user.id).then(items=>{setAttendanceQueue(items);if(navigator.onLine)syncAttendance().catch(()=>{});}).catch(()=>{});
     if(!previewOnly&&production&&"serviceWorker" in navigator) navigator.serviceWorker.register(new URL("sw.js",document.baseURI)).catch(()=>{});
     return ()=>{window.removeEventListener("online",reconnect);window.removeEventListener("offline",update);};
   },[user.id]);
@@ -273,7 +316,7 @@ function AppBody({user,onLogout,offlineSession,personnelIntake}:{user:User;onLog
   const setTheme = () => { const next = !dark; setDark(next); document.documentElement.setAttribute("data-theme",next?"dark":"light"); };
   if (document.documentElement.getAttribute("data-theme") !== (dark?"dark":"light")) document.documentElement.setAttribute("data-theme",dark?"dark":"light");
   async function syncAttendance() {
-    if(!production || !navigator.onLine || syncingAttendance.current)return;
+    if(!production || !offlineUnlocked(user.id) || !navigator.onLine || syncingAttendance.current)return;
     syncingAttendance.current=true;
     try {
       for(const item of await listAttendance(user.id)) {
@@ -429,10 +472,10 @@ function AppBody({user,onLogout,offlineSession,personnelIntake}:{user:User;onLog
       <div className="side-bottom"><div className="status-dot"/><span>{personnelIntake?"Operación real":"Versión de prueba"}<br/><small>{personnelIntake?"Nómina: Administración y Gerencia":"Datos en el servidor de vista previa"}</small></span></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="top-left"><button className="menu-button" aria-label="Abrir menú" onClick={()=>setMobileMenu(!mobileMenu)}><Menu size={20}/></button><span className="crumb">ONEFIX / <strong>{title}</strong></span></div><div className="top-actions"><span className="preview-chip">{user.role.toUpperCase()} · {user.email}</span><button className="icon-button" aria-label="Cambiar tema" onClick={setTheme} data-testid="button-theme">{dark?<Sun size={19}/>:<Moon size={19}/>}</button><button className="btn quiet" onClick={onLogout} data-testid="button-logout">Salir</button></div></header>
+      <header className="topbar"><div className="top-left"><button className="menu-button" aria-label="Abrir menú" onClick={()=>setMobileMenu(!mobileMenu)}><Menu size={20}/></button><span className="crumb">ONEFIX / <strong>{title}</strong></span></div><div className="top-actions"><span className="preview-chip">{user.role.toUpperCase()} · {user.email}</span>{personnelIntake&&<button className="btn quiet" type="button" onClick={()=>{setShowRecovery(v=>!v);setRecoveryResult("");}} data-testid="button-my-recovery">Mi recuperación</button>}<button className="icon-button" aria-label="Cambiar tema" onClick={setTheme} data-testid="button-theme">{dark?<Sun size={19}/>:<Moon size={19}/>}</button><button className="btn quiet" onClick={onLogout} data-testid="button-logout">Salir</button></div></header>
       <main id="main" className="main">
         <div className="content">
-        <div className="page-heading"><div><span className="eyebrow">{tab==="cobros"?"COBROS · USD":personnelIntake?"EMPLEADOS Y ASISTENCIA · USD":"CONTROL SEMANAL · USD"}</span><h1>{tab==="inicio"?"Centro de nómina":title}</h1><p>{tab==="inicio"?"Una vista clara de lo que está pendiente, aprobado y pagado.": tab==="nomina"?"De sábado a viernes; disponible desde el domingo siguiente. Administración revisa antes de que Gerencia apruebe.":tab==="produccion"?personnelIntake?"Registro diario de asistencia; nómina y pagos se gestionan en sus áreas autorizadas.":"Asistencia, tareas y avances en una sola vista.":tab==="personas"?personnelIntake?"Fichas de empleados para la operación real, disponibles únicamente con conexión.":"Empleados y subcontratistas desde una ficha única.":tab==="obras"?"Obras, contratos y ampliaciones autorizadas.":tab==="seguimiento"?"Registro privado de valores, abonos, descuentos, saldos y observaciones.":tab==="cobros"?"Facturas, saldos informados y fechas de vencimiento definidas manualmente.":tab==="accesos"?"Invitaciones privadas para el equipo de tres roles.":"Anticipos, préstamos y daños documentados."}</p></div><div className="heading-action">
+        <div className="page-heading"><div><span className="eyebrow">{tab==="cobros"?"COBROS · USD":personnelIntake?"EMPLEADOS Y ASISTENCIA · USD":"CONTROL SEMANAL · USD"}</span><h1>{tab==="inicio"?"Centro de nómina":title}</h1><p>{tab==="inicio"?"Una vista clara de lo que está pendiente, aprobado y pagado.": tab==="nomina"?"De sábado a viernes; disponible desde el domingo siguiente. Administración revisa antes de que Gerencia apruebe.":tab==="produccion"?personnelIntake?"Registro diario de asistencia; nómina y pagos se gestionan en sus áreas autorizadas.":"Asistencia, tareas y avances en una sola vista.":tab==="personas"?personnelIntake?"Fichas de empleados para la operación real, disponibles únicamente con conexión.":"Empleados y subcontratistas desde una ficha única.":tab==="obras"?"Obras, contratos y ampliaciones autorizadas.":tab==="seguimiento"?"Registro privado de valores, abonos, descuentos, saldos y observaciones.":tab==="cobros"?"Facturas, saldos informados y fechas de vencimiento definidas manualmente.":tab==="accesos"?"Invitaciones, recuperación y revocación de usuarios.":"Anticipos, préstamos y daños documentados."}</p></div><div className="heading-action">
           {(admin||production)&&tab==="personas" && <button className="btn primary" disabled={personnelIntake&&offline} onClick={()=>open("persona")}><Plus size={17}/> {personnelIntake||production?"Nuevo empleado":"Nueva persona"}</button>}
           {admin&&tab==="obras" && <button className="btn primary" onClick={()=>open("contrato")} disabled={!people.length||!projects.length}><Plus size={17}/> Nuevo contrato</button>}
           {production&&!personnelIntake&&tab==="produccion" && <button className="btn primary" onClick={()=>open("tarea")} disabled={!people.length||!projects.length}><Plus size={17}/> Nueva tarea</button>}
@@ -442,13 +485,18 @@ function AppBody({user,onLogout,offlineSession,personnelIntake}:{user:User;onLog
         {production&&attendanceQueue.length>0&&<section className="panel sync-panel" data-testid="attendance-pending"><div className="panel-head"><div><h2>Asistencias de este dispositivo</h2><p>Una asistencia pendiente no entra en nómina hasta confirmarse en el servidor. Pasados siete días requiere revisión de Administración y nunca se borra sola.</p></div><button className="btn outline" disabled={offline||busy} onClick={()=>syncAttendance().catch(()=>setError("No se pudieron sincronizar las asistencias."))}>Sincronizar asistencia</button></div><div className="row-list">{attendanceQueue.map(item=><div className="list-row" key={item.operationId}><div className="row-main"><b>{personName(Number(item.proposed.personId))} · {String(item.proposed.date)} · {String(item.proposed.projectName)}</b><small>{item.status==="review"?"En revisión por Administración":Date.now()-Date.parse(item.savedAt)>=7*24*60*60_000?"Venció el plazo de 7 días: requiere revisión":"Pendiente de enviar"}{item.message?` · ${item.message}`:""}</small></div></div>)}</div></section>}
         {admin&&tab==="produccion"&&(s?.attendanceConflicts?.length ?? 0)>0&&<section className="panel sync-panel attendance-conflicts" data-testid="attendance-conflicts"><div className="panel-head"><div><h2>Conflictos de asistencia</h2><p>Compara la versión vigente con la propuesta enviada por Producción. Una decisión se registra para auditoría.</p></div></div><div className="row-list">{s!.attendanceConflicts.map(c=><div className="list-row" key={c.operationId}><div className="row-main"><b>{c.personName} · {c.date}{c.reason==="expired"?" · Fuera de plazo (7 días)":""}</b><small><strong>Vigente:</strong> {c.currentProject||"Sin registro"} · {c.currentAbsent?"Ausencia":`${c.currentTimeIn||"—"} a ${c.currentTimeOut||"—"}`} · Responsable: {c.currentResponsible||"—"} · revisión {c.currentRevision} · {c.currentHours??0} h regulares · {c.currentOvertime??0} h extra · descanso {c.currentBreakMinutes??0} min · bono {usd(c.currentBonus??0)} · {c.currentNote||"Sin nota"}</small><small>Proyectos vigentes: {(c.currentAllocations?.length?c.currentAllocations:[{projectName:c.currentProject||"Sin registro",regularHours:c.currentHours??0,overtimeHours:c.currentOvertime??0}]).map((x:any)=>`${x.projectName} (${x.regularHours} h + ${x.overtimeHours} h extra)`).join("; ")}</small><small><strong>Propuesta:</strong> {c.proposed.projectName} · {c.proposed.absent?"Ausencia":`${c.proposed.timeIn||"—"} a ${c.proposed.timeOut||"—"}`} · Responsable: {c.proposed.responsible} · {c.proposed.hours} h regulares · {c.proposed.overtime} h extra · descanso {c.proposed.breakMinutes} min · bono {usd(c.proposed.bonus)} · {c.proposed.note||"Sin nota"}</small><small>Proyectos propuestos: {(c.proposed.allocations?.length?c.proposed.allocations:[{projectName:c.proposed.projectName,regularHours:c.proposed.hours,overtimeHours:c.proposed.overtime}]).map((x:any)=>`${x.projectName} (${x.regularHours} h + ${x.overtimeHours} h extra)`).join("; ")}</small><small>Enviada: {new Date(c.submittedAt).toLocaleString("es-US")}</small></div><div className="line-actions"><button className="table-action" disabled={busy} onClick={()=>send(`/api/attendance/conflicts/${c.operationId}/resolve`,{decision:"keep"})}>Conservar vigente</button><button className="table-action" disabled={busy} onClick={()=>{if(window.confirm(`¿Aceptar la asistencia propuesta para ${c.personName} el ${c.date}? Se reemplazará la versión vigente.`))send(`/api/attendance/conflicts/${c.operationId}/resolve`,{decision:"accept"});}}>Aceptar propuesta</button></div></div>)}</div></section>}
         {(offline||(!personnelIntake&&queue.length>0))&&<section className="panel sync-panel" data-testid="status-offline"><div className="panel-head"><div><h2>{offline?"Sin conexión al servidor":"Intentos locales anteriores por verificar"}</h2><p>{personnelIntake?production?"Se muestra la última copia cifrada mínima. Las asistencias guardadas aquí se enviarán al recuperar la conexión; las fichas no pueden editarse sin el servidor.":"La carga real requiere conexión. No se permite consultar ni registrar empleados sin el servidor.":offline?"Solo se muestra la última copia ficticia. No se pueden registrar pagos sin conexión.":"Estos intentos de una versión anterior no se enviarán automáticamente. Verifica cada recibo con Administración antes de descartarlos."}</p></div></div>{!personnelIntake&&<div className="row-list">{queue.map(p=><div className="list-row" key={p.operationId}><div className="row-main"><b>Recibo #{p.lineId} · {p.reference}</b><small>{p.status==="pending"?"Intento local no confirmado":`Conflicto anterior: ${p.message}`}</small></div><button className="table-action" onClick={async()=>{if(window.confirm("¿Verificaste con Administración el estado de este pago antes de retirar el intento local?")){await removePayment(p.operationId);setQueue((await listPayments()).filter(x=>x.userId===user.id));}}}>Retirar tras verificar</button></div>)}</div>}</section>}
+        {localCacheWarning&&<div role="alert" className="feedback error">{localCacheWarning}</div>}
         {error && <div role="alert" className="feedback error">{error}<button onClick={()=>setError("")} aria-label="Cerrar error"><X size={15}/></button></div>}
         {success && <div role="status" className="feedback success">{success}<button onClick={()=>setSuccess("")} aria-label="Cerrar aviso"><X size={15}/></button></div>}
+        {showRecovery&&personnelIntake&&<section className="panel recovery-panel" data-testid="panel-my-recovery"><div className="panel-head"><div><h2>Mi código de recuperación</h2><p>Confirma tu contraseña actual. El nuevo código sustituye al anterior, sirve una sola vez y vence en 180 días. Guárdalo fuera de esta app.</p></div><button className="btn quiet" type="button" onClick={()=>{setShowRecovery(false);setRecoveryResult("");}}>Cerrar</button></div><form className="access-form" onSubmit={async e=>{e.preventDefault();const form=e.currentTarget;setError("");setRecoveryResult("");try{const f=new FormData(form);const r=await (await apiRequest("POST","/api/auth/recovery-code",{password:f.get("password")})).json();setRecoveryResult(r.code);form.reset();}catch(err:any){setError(err.message||"No se pudo crear el código");}}}><Field label="Contraseña actual" name="password" type="password" required autoComplete="current-password"/><button className="btn primary" disabled={offline} type="submit" data-testid="button-create-recovery">Crear código</button></form>{recoveryResult&&<div className="feedback success" role="status"><p>Copia este código ahora. No volverá a mostrarse; no lo compartas.</p><input aria-label="Código personal de recuperación" readOnly value={recoveryResult} onFocus={e=>e.target.select()} data-testid="input-personal-recovery"/><button className="btn outline" type="button" onClick={()=>navigator.clipboard?.writeText(recoveryResult)}>Copiar código</button></div>}</section>}
         {isLoading && <div className="loading-grid"><div className="skeleton"/><div className="skeleton"/><div className="skeleton"/></div>}
         {isError && <div className="feedback error" role="alert">No se pudieron cargar los datos. Comprueba que el servidor esté disponible. <button type="button" className="table-action" onClick={()=>retryState()} data-testid="retry-state">Reintentar carga</button></div>}
         {tab==="seguimiento"&&!production&&<ContractTracking admin={admin||manager} offline={offline}/>}
         {tab==="cobros"&&!production&&<Receivables offline={offline}/>}
-        {manager&&tab==="accesos"&&<section className="panel"><div className="panel-head"><div><h2>Equipo autorizado</h2><p>Gerencia administra invitaciones de un solo uso, válidas por 24 horas.</p></div></div><div className="row-list">{users.map(u=><div className="list-row" key={u.id}><div className="row-main"><b>{u.email}</b><small>{u.role}</small></div></div>)}</div><form className="access-form" onSubmit={async e=>{e.preventDefault();setError("");setInviteResult("");const f=new FormData(e.currentTarget);try{const r=await (await apiRequest("POST","/api/auth/invite",{username:f.get("username"),role:f.get("role")})).json();setInviteResult(`${location.origin}${location.pathname}?invite=${encodeURIComponent(r.inviteToken)}`);}catch(err:any){setError(err.message);}}}><Field label="Usuario" name="username" required minLength={3} maxLength={32} placeholder="administracion"/><Field label="Rol" name="role" required><option value="produccion">Producción</option><option value="administracion">Administración</option><option value="gerencia">Gerencia</option></Field><button className="btn primary" type="submit" data-testid="button-invite">Crear invitación</button></form>{inviteResult&&<div className="feedback success"><p>Comparte el enlace privado solo con la persona invitada:</p><input aria-label="Enlace de invitación" readOnly value={inviteResult} onFocus={e=>e.target.select()} data-testid="input-invite-link"/><button className="btn outline" onClick={()=>navigator.clipboard?.writeText(inviteResult)}>Copiar enlace</button></div>}</section>}
+        {manager&&tab==="accesos"&&<section className="panel access-panel"><div className="panel-head"><div><h2>Equipo autorizado</h2><p>Revocar desactiva el acceso y cierra las sesiones en línea sin borrar la auditoría. Los dispositivos de Producción sin conexión pueden conservar su copia cifrada hasta siete días.</p></div></div>
+          <div className="row-list">{users.map(u=><div className="list-row access-row" key={u.id} data-testid={`access-user-${u.id}`}><div className="row-main"><b>{u.email}</b><small>{u.role} · {u.active?"Activo":"Revocado"}</small></div>{u.active&&u.id!==user.id&&<div className="line-actions"><button type="button" className="table-action" disabled={offline} data-testid={`button-reset-user-${u.id}`} onClick={async()=>{setError("");setResetLinkResult("");try{const r=await (await apiRequest("POST",`/api/auth/users/${u.id}/reset-link`,{})).json();setResetLinkResult(`${location.origin}${location.pathname}?reset=${encodeURIComponent(r.resetToken)}`);}catch(err:any){setError(err.message||"No se pudo generar el enlace");}}}>Crear enlace de recuperación</button><button type="button" className="table-action danger-action" disabled={offline} data-testid={`button-revoke-user-${u.id}`} onClick={async()=>{if(!window.confirm(`¿Revocar el acceso de ${u.email}? Se cerrarán sus sesiones en línea y no podrá volver a entrar hasta que Gerencia emita una nueva invitación.`))return;setError("");setResetLinkResult("");try{await apiRequest("POST",`/api/auth/users/${u.id}/revoke`,{});await queryClient.invalidateQueries({queryKey:["/api/auth/users"]});setSuccess(`Acceso de ${u.email} revocado.`);}catch(err:any){setError(err.message||"No se pudo revocar");}}}>Revocar acceso</button></div>}{u.id===user.id&&<small>Tu cuenta · guarda tu código en «Mi recuperación»</small>}</div>)}</div>
+          {resetLinkResult&&<div className="feedback success" role="status"><p>Comparte este enlace únicamente con la persona indicada. Caduca en 24 horas y solo funciona una vez.</p><input aria-label="Enlace de recuperación" readOnly value={resetLinkResult} onFocus={e=>e.target.select()} data-testid="input-reset-link"/><button className="btn outline" type="button" onClick={()=>navigator.clipboard?.writeText(resetLinkResult)}>Copiar enlace</button></div>}
+          <form className="access-form" onSubmit={async e=>{e.preventDefault();setError("");setInviteResult("");const f=new FormData(e.currentTarget);try{const r=await (await apiRequest("POST","/api/auth/invite",{username:f.get("username"),role:f.get("role")})).json();setInviteResult(`${location.origin}${location.pathname}?invite=${encodeURIComponent(r.inviteToken)}`);}catch(err:any){setError(err.message);}}}><Field label="Usuario" name="username" required minLength={3} maxLength={32} placeholder="administracion"/><Field label="Rol" name="role" required><option value="produccion">Producción</option><option value="administracion">Administración</option><option value="gerencia">Gerencia</option></Field><button className="btn primary" type="submit" data-testid="button-invite">Crear invitación o reactivar</button></form>{inviteResult&&<div className="feedback success"><p>Comparte el enlace privado solo con la persona invitada. Para reactivar una cuenta, conserva el mismo usuario y rol:</p><input aria-label="Enlace de invitación" readOnly value={inviteResult} onFocus={e=>e.target.select()} data-testid="input-invite-link"/><button className="btn outline" onClick={()=>navigator.clipboard?.writeText(inviteResult)}>Copiar enlace</button></div>}</section>}
         {s && tab==="inicio" && <>
           <section className="metric-grid" aria-label="Indicadores"><article className="metric featured"><span>Neto de la última nómina</span><strong data-testid="text-net">{usd(weeklyNet)}</strong><small>{activePayroll ? `${activePayroll.weekStart} a ${activePayroll.weekEnd}`:"Sin nóminas generadas"}</small></article><article className="metric"><span>Bruto calculado</span><strong>{usd(weeklyGross)}</strong><small>Empleados y tareas aprobadas</small></article><article className="metric"><span>Tareas por aprobar</span><strong>{pending.toString().padStart(2,"0")}</strong><small>Producción pendiente</small></article><article className="metric"><span>Descuentos por recuperar</span><strong>{usd(outstanding)}</strong><small>Anticipos, préstamos y daños</small></article></section>
           <div className="overview-grid"><section className="panel"><div className="panel-head"><div><h2>Últimas nóminas</h2><p>Revisión y desembolsos</p></div><button className="text-link" onClick={()=>setTab("nomina")}>Ver todas <ArrowRight size={15}/></button></div>{payrolls.length?<div className="row-list">{payrolls.slice(0,5).map(p=><div className="list-row" key={p.id}><div className="list-icon"><CalendarDays size={18}/></div><div className="row-main"><b>Semana {p.weekStart}</b><small>{p.lines.length} personas · termina {p.weekEnd}</small></div><Badge value={p.status}/><strong>{usd(p.lines.reduce((v,l)=>v+l.net,0))}</strong></div>)}</div>:<Empty title="Todavía no hay nóminas" description="Carga personas, asistencia o tareas y genera tu primera semana." action="Ir a producción" onClick={()=>setTab("produccion")}/>}</section>
