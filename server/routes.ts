@@ -12,6 +12,7 @@ import { all, dateValid, db, generatePayroll, money, payrollFull, row, rows, run
 import { registerAuth, requireAuth, downloadAuth, allow, audit } from "./auth";
 import { registerContractTracking } from "./contract-tracking";
 import { createReceiptPdf } from "./receipt-pdf";
+import { createCheckVoucherPdf } from "./check-voucher-pdf";
 function issue(res: any, e: unknown) {
     let message = e && typeof e === "object" && "issues" in e && Array.isArray((e as any).issues)
         ? (e as any).issues[0]?.message || "Revisa los datos del formulario"
@@ -54,7 +55,7 @@ function line(doc: PDFKit.PDFDocument, label: string, value: string) {
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
     registerAuth(app);
     app.use("/api", (req, res, next) => {
-        if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/pdf|deductions\/\d+\/photo)$/.test(req.path))
+        if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/(?:pdf|cheque)|deductions\/\d+\/photo)$/.test(req.path))
             return downloadAuth(req, res, next);
         return requireAuth(req, res, next);
     });
@@ -788,6 +789,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
         receipt.pipe(res);
         receipt.end();
+    });
+    app.get("/api/lines/:id/cheque", allow("administracion", "gerencia"), async (req, res) => {
+        const l = await row("SELECT l.*,p.weekStart,p.weekEnd,p.status FROM payroll_lines l JOIN payrolls p ON p.id=l.payrollId WHERE l.id=?", Number(req.params.id));
+        if (!l || l.status !== "aprobado" || !l.paid)
+            return res.status(404).json({ error: "Comprobante tipo cheque disponible únicamente tras registrar el pago" });
+        const person = await row("SELECT document FROM people WHERE id=?", l.personId);
+        const cheque = createCheckVoucherPdf({
+            payrollId: l.payrollId, lineId: l.id, payee: l.personName, document: person?.document || "",
+            net: Number(l.net), weekStart: l.weekStart, weekEnd: l.weekEnd,
+            paidAt: l.paidAt || "", method: l.method || "", reference: l.reference || "",
+        });
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-comprobante-tipo-cheque-${l.payrollId}-${l.id}.pdf"`);
+        cheque.pipe(res);
+        cheque.end();
     });
     app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
         const d = (await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id)));

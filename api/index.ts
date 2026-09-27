@@ -6,7 +6,7 @@ import express from "express";
 import { createServer } from "node:http";
 
 // server/routes.ts
-import PDFDocument2 from "pdfkit";
+import PDFDocument3 from "pdfkit";
 
 // shared/schema.ts
 import { z } from "zod";
@@ -1020,6 +1020,107 @@ function createReceiptPdf(receipt) {
   return doc;
 }
 
+// server/check-voucher-pdf.ts
+import PDFDocument2 from "pdfkit";
+var BLACK2 = "#151515";
+var ORANGE2 = "#E87512";
+var MUTED = "#555555";
+var ONES = ["", "UNO", "DOS", "TRES", "CUATRO", "CINCO", "SEIS", "SIETE", "OCHO", "NUEVE"];
+var TEENS = ["DIEZ", "ONCE", "DOCE", "TRECE", "CATORCE", "QUINCE", "DIECIS\xC9IS", "DIECISIETE", "DIECIOCHO", "DIECINUEVE"];
+var TENS = ["", "", "VEINTE", "TREINTA", "CUARENTA", "CINCUENTA", "SESENTA", "SETENTA", "OCHENTA", "NOVENTA"];
+var HUNDREDS = ["", "CIENTO", "DOSCIENTOS", "TRESCIENTOS", "CUATROCIENTOS", "QUINIENTOS", "SEISCIENTOS", "SETECIENTOS", "OCHOCIENTOS", "NOVECIENTOS"];
+function underThousand(n) {
+  if (n === 0) return "";
+  if (n === 100) return "CIEN";
+  const hundred = Math.floor(n / 100);
+  const rest = n % 100;
+  let tail = "";
+  if (rest < 10) tail = ONES[rest];
+  else if (rest < 20) tail = TEENS[rest - 10];
+  else if (rest === 20) tail = "VEINTE";
+  else if (rest < 30) tail = `VEINTI${ONES[rest - 20].toLowerCase()}`.toUpperCase();
+  else {
+    const ten = Math.floor(rest / 10);
+    tail = TENS[ten] + (rest % 10 ? ` Y ${ONES[rest % 10]}` : "");
+  }
+  return [HUNDREDS[hundred], tail].filter(Boolean).join(" ");
+}
+function apocopate(text) {
+  return text.replace(/VEINTIUNO$/, "VEINTI\xDAN").replace(/ Y UNO$/, " Y UN").replace(/ UNO$/, " UN");
+}
+function amountInWords(amount) {
+  const cents2 = Math.round(amount * 100);
+  if (!Number.isFinite(amount) || cents2 < 0 || cents2 >= 1e11) {
+    throw new Error("Importe no v\xE1lido para el comprobante tipo cheque");
+  }
+  const whole = Math.floor(cents2 / 100);
+  const millions = Math.floor(whole / 1e6);
+  const thousands = Math.floor(whole / 1e3) % 1e3;
+  const rest = whole % 1e3;
+  const parts = [
+    millions ? millions === 1 ? "UN MILL\xD3N" : `${apocopate(underThousand(millions))} MILLONES` : "",
+    thousands ? thousands === 1 ? "MIL" : `${apocopate(underThousand(thousands))} MIL` : "",
+    rest ? apocopate(underThousand(rest)) : ""
+  ].filter(Boolean);
+  return `${whole === 1 ? "UN" : parts.join(" ") || "CERO"}${millions && whole % 1e6 === 0 ? " DE" : ""} ${whole === 1 ? "D\xD3LAR" : "D\xD3LARES"} CON ${String(cents2 % 100).padStart(2, "0")}/100`;
+}
+function createCheckVoucherPdf(v) {
+  const doc = new PDFDocument2({ size: "LETTER", margin: 0 });
+  doc.info.Title = `Comprobante tipo cheque ONEFIX, n\xF3mina #${v.payrollId}`;
+  doc.info.Author = "Perplexity Computer";
+  const label = (text, x, y) => doc.font("Helvetica-Bold").fontSize(8).fillColor(MUTED).text(text.toUpperCase(), x, y);
+  const body = (text, x, y, width, size = 11) => doc.font("Helvetica").fontSize(size).fillColor(BLACK2).text(text, x, y, { width });
+  const rule = (y) => doc.moveTo(36, y).lineTo(576, y).lineWidth(0.8).strokeColor("#C9C9C9").stroke();
+  doc.rect(0, 0, 612, 83).fill(BLACK2);
+  doc.rect(0, 0, 8, 83).fill(ORANGE2);
+  doc.font("Helvetica-Bold").fontSize(22).fillColor("#FFFFFF").text("ONEFIX", 36, 17);
+  doc.fontSize(9).fillColor(ORANGE2).text("CONSTRUCTION", 36, 49);
+  doc.fontSize(11).fillColor("#FFFFFF").text("COMPROBANTE TIPO CHEQUE", 318, 22, { width: 260 });
+  doc.fontSize(8).fillColor(ORANGE2).text("NO NEGOCIABLE  |  NO ES UN CHEQUE BANCARIO", 318, 48, { width: 260 });
+  label("Fecha de registro", 36, 103);
+  body(v.paidAt, 36, 118, 280);
+  label("Control interno", 363, 103);
+  body(`N\xF3mina #${v.payrollId} / Pago #${v.lineId}`, 363, 118, 210);
+  rule(149);
+  label("P\xE1guese a", 36, 164);
+  body(v.payee, 36, 180, 365, 15);
+  doc.roundedRect(435, 166, 141, 47, 5).fill("#FFF2E6");
+  doc.font("Helvetica-Bold").fontSize(14).fillColor(BLACK2).text(`USD ${Number(v.net).toFixed(2)}`, 444, 181, { width: 123, align: "right" });
+  label("La cantidad de", 36, 225);
+  body(amountInWords(v.net), 36, 241, 540, 10);
+  rule(287);
+  label("Concepto", 36, 303);
+  body(`Pago de n\xF3mina del ${v.weekStart} al ${v.weekEnd}`, 36, 318, 540);
+  label("Documento del beneficiario", 36, 355);
+  body(v.document || "No registrado", 36, 370, 238);
+  label("M\xE9todo de pago", 302, 355);
+  body(v.method || "No registrado", 302, 370, 274);
+  label("Referencia del pago", 36, 409);
+  body(v.reference || "No registrada", 36, 424, 540);
+  rule(470);
+  doc.font("Helvetica-Bold").fontSize(9).fillColor(ORANGE2).text("PAGO REGISTRADO  \xB7  DOCUMENTO OPERATIVO", 36, 486);
+  doc.font("Helvetica").fontSize(8.5).fillColor(MUTED).text("Constancia de un pago asentado en ONEFIX. No sustituye un cheque bancario, una orden de transferencia ni una confirmaci\xF3n de fondos.", 36, 505, { width: 540 });
+  doc.save().dash(3, { space: 3 });
+  doc.moveTo(36, 575).lineTo(576, 575).strokeColor("#888888").stroke();
+  doc.restore();
+  doc.font("Helvetica-Bold").fontSize(10).fillColor(BLACK2).text("TAL\xD3N DE CONTROL", 36, 598);
+  label("Beneficiario", 36, 627);
+  body(v.payee, 36, 642, 300);
+  label("Per\xEDodo", 351, 627);
+  body(`${v.weekStart} al ${v.weekEnd}`, 351, 642, 225, 9);
+  label("N\xF3mina / pago", 36, 682);
+  body(`#${v.payrollId} / #${v.lineId}`, 36, 697, 220);
+  label("Importe neto", 287, 682);
+  body(`USD ${Number(v.net).toFixed(2)}`, 287, 697, 150);
+  label("Referencia", 440, 682);
+  body(v.reference || "No registrada", 440, 697, 136, 9);
+  doc.font("Helvetica-Bold").fontSize(8).fillColor(ORANGE2).text("NO NEGOCIABLE", 36, 748);
+  if (v.sample) {
+    doc.font("Helvetica-Bold").fontSize(8).fillColor(MUTED).text("DATOS FICTICIOS \xB7 DOCUMENTO DE MUESTRA", 270, 748, { width: 306, align: "right" });
+  }
+  return doc;
+}
+
 // server/routes.ts
 function issue2(res, e) {
   let message = e && typeof e === "object" && "issues" in e && Array.isArray(e.issues) ? e.issues[0]?.message || "Revisa los datos del formulario" : e instanceof Error ? e.message : "No se pudo completar la operaci\xF3n";
@@ -1037,7 +1138,7 @@ function issue2(res, e) {
   res.status(["23505", "23503", "23514"].includes(code) || /UNIQUE|FOREIGN KEY|CHECK/.test(message) ? 409 : 400).json({ error: message });
 }
 async function pdf(res, name, draw) {
-  const doc = new PDFDocument2({ margin: 50, size: "LETTER", bufferPages: true });
+  const doc = new PDFDocument3({ margin: 50, size: "LETTER", bufferPages: true });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
   doc.pipe(res);
@@ -1061,7 +1162,7 @@ function line(doc, label, value2) {
 async function registerRoutes(httpServer, app) {
   registerAuth(app);
   app.use("/api", (req, res, next) => {
-    if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/pdf|deductions\/\d+\/photo)$/.test(req.path))
+    if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/(?:pdf|cheque)|deductions\/\d+\/photo)$/.test(req.path))
       return downloadAuth(req, res, next);
     return requireAuth(req, res, next);
   });
@@ -1752,6 +1853,28 @@ async function registerRoutes(httpServer, app) {
     res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
     receipt.pipe(res);
     receipt.end();
+  });
+  app.get("/api/lines/:id/cheque", allow("administracion", "gerencia"), async (req, res) => {
+    const l = await row("SELECT l.*,p.weekStart,p.weekEnd,p.status FROM payroll_lines l JOIN payrolls p ON p.id=l.payrollId WHERE l.id=?", Number(req.params.id));
+    if (!l || l.status !== "aprobado" || !l.paid)
+      return res.status(404).json({ error: "Comprobante tipo cheque disponible \xFAnicamente tras registrar el pago" });
+    const person = await row("SELECT document FROM people WHERE id=?", l.personId);
+    const cheque = createCheckVoucherPdf({
+      payrollId: l.payrollId,
+      lineId: l.id,
+      payee: l.personName,
+      document: person?.document || "",
+      net: Number(l.net),
+      weekStart: l.weekStart,
+      weekEnd: l.weekEnd,
+      paidAt: l.paidAt || "",
+      method: l.method || "",
+      reference: l.reference || ""
+    });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-comprobante-tipo-cheque-${l.payrollId}-${l.id}.pdf"`);
+    cheque.pipe(res);
+    cheque.end();
   });
   app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
     const d = await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id));
