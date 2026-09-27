@@ -40,7 +40,7 @@ export function registerContractTracking(app: Express) {
       status, note, "needsReview", "updatedAt" FROM contract_tracking ORDER BY id DESC`);
     res.json(items);
   });
-  app.post("/api/contract-tracking", allow("administracion"), async (req, res) => {
+  app.post("/api/contract-tracking", allow("administracion", "gerencia"), async (req, res) => {
     const parsed = contractInput.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "Revisa el contrato" });
     const c = parsed.data;
@@ -60,7 +60,7 @@ export function registerContractTracking(app: Express) {
       res.status(201).json(item);
     } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : "No se pudo guardar" }); }
   });
-  app.patch("/api/contract-tracking/:id", allow("administracion"), async (req, res) => {
+  app.patch("/api/contract-tracking/:id", allow("administracion", "gerencia"), async (req, res) => {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: "Contrato inválido" });
     const parsed = contractInput.safeParse(req.body);
