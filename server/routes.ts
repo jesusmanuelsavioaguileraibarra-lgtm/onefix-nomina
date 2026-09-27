@@ -13,7 +13,7 @@ import { registerAuth, requireAuth, downloadAuth, allow, audit } from "./auth";
 import { registerContractTracking } from "./contract-tracking";
 import { registerReceivables } from "./receivables";
 import { operationalPayrollWrite } from "./operational-access";
-import { createReceiptPdf } from "./receipt-pdf";
+import { dispatchReceipt, enqueueReceipt, receiptForLine, registerReceiptDelivery } from "./receipt-delivery";
 function issue(res: any, e: unknown) {
     let message = e && typeof e === "object" && "issues" in e && Array.isArray((e as any).issues)
         ? (e as any).issues[0]?.message || "Revisa los datos del formulario"
@@ -69,6 +69,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
             && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path))
             && !operationalPayrollWrite(req.method, req.path, req.currentUser!.role)
+            && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
             return res.status(423).json({ error: "Esta operación no está habilitada. Nómina y pagos solo se gestionan por Administración y Gerencia, según su etapa de aprobación." });
         }
@@ -77,6 +78,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
             && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path))
             && !operationalPayrollWrite(req.method, req.path, req.currentUser!.role)
+            && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
             return res.status(423).json({ error: "La nómina y los pagos siguen bloqueados." });
         }
@@ -84,6 +86,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     });
     registerContractTracking(app);
     registerReceivables(app);
+    registerReceiptDelivery(app);
     app.get("/api/state", async (req, res) => {
         const production = req.currentUser!.role === "produccion";
         const realProduction = production && process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1";
@@ -125,7 +128,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
             if ((await row("SELECT id FROM people WHERE lower(document)=lower(?)", p.document)))
                 throw new Error("Ya existe una persona con ese documento");
-            const result = (await run("INSERT INTO people (name,kind,jobTitle,document,phone,email,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0));
+            const result = (await run("INSERT INTO people (name,kind,jobTitle,document,phone,email,receiptChannel,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.jobTitle, p.document, p.phone, p.email, p.receiptChannel, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0));
             (await audit(req.currentUser!.id, "person-create", String(result.lastInsertRowid)));
             res.json({ id: result.lastInsertRowid });
         }
@@ -155,7 +158,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
             if ((await row("SELECT id FROM people WHERE lower(document)=lower(?) AND id<>?", p.document, original.id)))
                 throw new Error("Ya existe una persona con ese documento");
-            (await run("UPDATE people SET name=?,jobTitle=?,document=?,phone=?,email=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id));
+            (await run("UPDATE people SET name=?,jobTitle=?,document=?,phone=?,email=?,receiptChannel=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.jobTitle, p.document, p.phone, p.email, p.receiptChannel, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id));
             (await audit(req.currentUser!.id, "person-update", String(original.id)));
             res.json({ ok: true });
         }
@@ -611,9 +614,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                     new Date().toISOString(), method, reference, lineId);
                 if (changed.changes !== 1)
                     throw new Error("El pago ya está registrado o la nómina no está aprobada");
+                await enqueueReceipt(lineId);
                 await audit(req.currentUser!.id, "payment", String(lineId));
             })();
-            res.json({ ok: true });
+            await dispatchReceipt(lineId).catch(() => {});
+            res.json({ ok: true, delivery: await row(`SELECT status,"lastError" FROM receipt_deliveries WHERE "lineId"=?`, lineId) });
         }
         catch (e) {
             issue(res, e);
@@ -644,15 +649,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                     if (!changed.changes)
                         return { operationId, status: "conflict", message: "Pago modificado en otro dispositivo" };
                     (await run("INSERT INTO payment_events(operationId,lineId,userId,method,reference,recordedAt,syncedAt) VALUES (?,?,?,?,?,?,?)", operationId, lineId, req.currentUser!.id, method, reference, recordedAt, new Date().toISOString()));
+                    await enqueueReceipt(lineId);
                     (await audit(req.currentUser!.id, "payment-sync", String(lineId)));
-                    return { operationId, status: "synced", lineId };
+                    return { operationId, status: "synced", lineId, newlyPaid: true };
                 })());
             }
             catch {
                 return { operationId, status: "conflict", message: "No se pudo registrar. Verifica con Administración" };
             }
         });
-        res.json({ results: await Promise.all(results) });
+        const processed = await Promise.all(results);
+        for (const item of processed) {
+            if ("newlyPaid" in item && item.newlyPaid && "lineId" in item && typeof item.lineId === "number")
+                await dispatchReceipt(item.lineId).catch(() => {});
+        }
+        res.json({ results: processed.map(item => {
+            const { newlyPaid, ...safe } = item as typeof item & { newlyPaid?: boolean };
+            return safe;
+        }) });
     });
     app.get("/api/payrolls/:id/pdf/:type", allow("administracion", "gerencia"), async (req, res) => {
         const p = (await row("SELECT * FROM payrolls WHERE id=?", Number(req.params.id)));
@@ -780,25 +794,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
     });
     app.get("/api/lines/:id/pdf", allow("administracion", "gerencia"), async (req, res) => {
-        const l = (await row("SELECT l.*,p.weekStart,p.weekEnd,p.status FROM payroll_lines l JOIN payrolls p ON p.id=l.payrollId WHERE l.id=?", Number(req.params.id)));
-        if (!l || l.status !== "aprobado")
+        const receipt = await receiptForLine(Number(req.params.id));
+        if (!receipt)
             return res.status(404).json({ error: "Recibo disponible tras la aprobación" });
-        const person = (await row("SELECT * FROM people WHERE id=?", l.personId));
-        const includedTasks = (await rows("SELECT t.*,pr.name AS projectName,c.number AS contractNumber FROM tasks t JOIN projects pr ON pr.id=t.projectId LEFT JOIN contracts c ON c.id=t.contractId WHERE t.payrollId=? AND t.personId=? ORDER BY t.date,t.id", l.payrollId, l.personId));
-        const receipt = createReceiptPdf({
-            personName: l.personName, jobTitle: l.jobTitle, document: person.document, kind: l.kind,
-            phone: person.phone, email: person.email, bank: person.bank, account: person.account,
-            weekStart: l.weekStart, weekEnd: l.weekEnd, payrollId: l.payrollId,
-            projects: l.projectAllocations === null ? null : JSON.parse(l.projectAllocations),
-            days: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot),
-            tasks: includedTasks, details: l.details, observation: l.observation,
-            gross: l.gross, deductions: l.deductions, net: l.net, paid: !!l.paid,
-            method: l.method, reference: l.reference, paidAt: l.paidAt,
-        });
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
-        receipt.pipe(res);
-        receipt.end();
+        res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${receipt.line.payrollId}-${receipt.line.id}.pdf"`);
+        receipt.pdf.pipe(res);
+        receipt.pdf.end();
     });
     app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
         const d = (await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id)));

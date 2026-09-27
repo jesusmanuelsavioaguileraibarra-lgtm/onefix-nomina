@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS people (
   document TEXT NOT NULL,
   phone TEXT NOT NULL,
   email TEXT NOT NULL,
+  "receiptChannel" TEXT NOT NULL DEFAULT 'auto',
   bank TEXT NOT NULL,
   account TEXT NOT NULL,
   "payType" TEXT NOT NULL,
@@ -135,6 +136,20 @@ CREATE TABLE IF NOT EXISTS payment_events (
   reference TEXT NOT NULL,
   "recordedAt" TEXT NOT NULL,
   "syncedAt" TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS receipt_deliveries (
+  id BIGSERIAL PRIMARY KEY,
+  "lineId" INTEGER NOT NULL UNIQUE REFERENCES payroll_lines(id),
+  channel TEXT NOT NULL CHECK (channel IN ('email','whatsapp','none')),
+  destination TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL CHECK (status IN ('pending','configuration','missing_contact','sending','accepted','failed','verify')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  "providerId" TEXT,
+  "lastError" TEXT NOT NULL DEFAULT '',
+  "attemptedAt" TIMESTAMPTZ,
+  "acceptedAt" TIMESTAMPTZ,
+  "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS payroll_revisions (

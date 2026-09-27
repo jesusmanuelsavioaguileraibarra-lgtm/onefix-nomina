@@ -4,6 +4,7 @@ import { registerRoutes } from "./routes";
 import { verifyDatabase } from "./pg-storage";
 import { ensureContractTrackingSchema } from "./contract-tracking";
 import { ensureReceivablesSchema } from "./receivables";
+import { ensureReceiptDeliverySchema } from "./receipt-delivery";
 
 declare module "http" {
   interface IncomingMessage {
@@ -15,6 +16,7 @@ export async function createApp() {
   await verifyDatabase();
   await ensureContractTrackingSchema();
   await ensureReceivablesSchema();
+  await ensureReceiptDeliverySchema();
   const app = express();
   const httpServer = createServer(app);
 

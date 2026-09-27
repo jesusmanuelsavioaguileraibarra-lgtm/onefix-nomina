@@ -1,5 +1,26 @@
 # ONEFIX · Servidor de nómina con Neon
 
+## Entrega de comprobantes
+
+Al confirmar un pago en línea, el servidor crea un registro único de entrega para esa partida y prepara el PDF del recibo. La ficha de la persona define `Automático` (correo si existe; de lo contrario WhatsApp), `Correo` o `WhatsApp`. Si falta el contacto elegido o la integración, el pago permanece confirmado y el recibo figura como pendiente de contacto o configuración; nunca se marca como enviado sin respuesta del proveedor.
+
+Para activar el correo transaccional en el servidor de Vercel:
+
+- `ONEFIX_RESEND_API_KEY`: clave privada de Resend. No colocar en `VITE_*` ni en el repositorio.
+- `ONEFIX_FROM_EMAIL`: remitente perteneciente a un dominio autorizado en Resend, por ejemplo `ONEFIX <nomina@dominio-de-la-empresa.com>`.
+
+Para activar WhatsApp Business Cloud API en Vercel:
+
+- `ONEFIX_WHATSAPP_TOKEN`: token de acceso empresarial de Meta.
+- `ONEFIX_WHATSAPP_PHONE_ID`: identificador del número emisor registrado.
+- `ONEFIX_WHATSAPP_TEMPLATE`: nombre de una plantilla aprobada para mensajes iniciados por la empresa, con encabezado PDF de tipo documento y cuerpo sin variables.
+- `ONEFIX_WHATSAPP_LANGUAGE`: código exacto del idioma aprobado para esa plantilla.
+- `ONEFIX_META_GRAPH_VERSION`: versión habilitada de Graph API, con formato `vNN.N`.
+
+No se configura ninguna integración por defecto. Antes de activarlas, confirmar la titularidad del remitente, el destino de prueba y el consentimiento de los trabajadores para recibir comprobantes por cada canal. Probar con contactos ficticios o propios, nunca con el directorio real de una sola vez. Las credenciales son exclusivas del servidor; no compartirlas por chat.
+
+Los estados `accepted` significan únicamente que Resend o Meta aceptaron la solicitud, no que el mensaje llegó o fue leído. Los intentos de red de resultado incierto quedan en `verify`; Administración debe contrastarlos con el panel del proveedor y confirmar que no hubo envío antes de liberar el reintento. No se reenvía automáticamente un estado incierto o aceptado. Los registros de pagos anteriores a esta función conservan `Sin registro` y no se envían retroactivamente.
+
 Primera versión de prueba para organizar empleados y subcontratistas de ONEFIX Construction. La app se inicia vacía y no importa los tres archivos históricos.
 
 ## Funciones incluidas

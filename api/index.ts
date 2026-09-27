@@ -16,7 +16,8 @@ var personInput = z.object({
   jobTitle: z.string().trim().max(120).default(""),
   document: z.string().trim().min(1),
   phone: z.string().trim().min(1),
-  email: z.string().trim().default(""),
+  email: z.union([z.email(), z.literal("")]).default(""),
+  receiptChannel: z.enum(["auto", "email", "whatsapp"]).default("auto"),
   bank: z.string().trim().default(""),
   account: z.string().trim().default(""),
   payType: z.enum(["fijo", "hora", "tareas"]),
@@ -171,6 +172,7 @@ var columns = /* @__PURE__ */ new Set([
   "overtimeEnabled",
   "authorizedAmount",
   "jobTitle",
+  "receiptChannel",
   "projectName",
   "timeIn",
   "timeOut",
@@ -1202,6 +1204,253 @@ function createReceiptPdf(receipt) {
   return doc;
 }
 
+// server/receipt-delivery.ts
+async function ensureReceiptDeliverySchema() {
+  await run(`ALTER TABLE people ADD COLUMN IF NOT EXISTS "receiptChannel" TEXT NOT NULL DEFAULT 'auto'`);
+  await run(`CREATE TABLE IF NOT EXISTS receipt_deliveries (
+    id BIGSERIAL PRIMARY KEY,
+    "lineId" INTEGER NOT NULL UNIQUE REFERENCES payroll_lines(id),
+    channel TEXT NOT NULL CHECK (channel IN ('email','whatsapp','none')),
+    destination TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL CHECK (status IN ('pending','configuration','missing_contact','sending','accepted','failed','verify')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    "providerId" TEXT,
+    "lastError" TEXT NOT NULL DEFAULT '',
+    "attemptedAt" TIMESTAMPTZ,
+    "acceptedAt" TIMESTAMPTZ,
+    "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`);
+}
+function whatsappReady() {
+  return !!(process.env.ONEFIX_WHATSAPP_TOKEN && process.env.ONEFIX_WHATSAPP_PHONE_ID && process.env.ONEFIX_WHATSAPP_TEMPLATE && process.env.ONEFIX_WHATSAPP_LANGUAGE && /^v\d+\.\d+$/.test(process.env.ONEFIX_META_GRAPH_VERSION || ""));
+}
+async function enqueueReceipt(lineId) {
+  const line2 = await row(`SELECT l.id,l.paid,p.email,p.phone,p."receiptChannel" FROM payroll_lines l
+    JOIN people p ON p.id=l."personId" WHERE l.id=?`, lineId);
+  if (!line2?.paid) throw new Error("El recibo se prepara solo despu\xE9s de registrar el pago");
+  const email = String(line2.email || "").trim().toLowerCase();
+  const phone = String(line2.phone || "").trim();
+  const channel = line2.receiptChannel === "email" ? email ? "email" : "none" : line2.receiptChannel === "whatsapp" ? phone ? "whatsapp" : "none" : email ? "email" : phone ? "whatsapp" : "none";
+  const destination = channel === "email" ? email : channel === "whatsapp" ? phone : "";
+  const status = channel === "none" ? "missing_contact" : channel === "whatsapp" ? whatsappReady() ? "pending" : "configuration" : !process.env.ONEFIX_RESEND_API_KEY || !process.env.ONEFIX_FROM_EMAIL ? "configuration" : "pending";
+  await run(`INSERT INTO receipt_deliveries ("lineId",channel,destination,status)
+    VALUES (?,?,?,?) ON CONFLICT ("lineId") DO NOTHING`, lineId, channel, destination, status);
+}
+async function receiptForLine(lineId) {
+  const l = await row(`SELECT l.*,p."weekStart",p."weekEnd",p.status FROM payroll_lines l
+    JOIN payrolls p ON p.id=l."payrollId" WHERE l.id=?`, lineId);
+  if (!l || l.status !== "aprobado") return null;
+  const person = await row("SELECT * FROM people WHERE id=?", l.personId);
+  if (!person) return null;
+  const tasks = await rows(`SELECT t.*,pr.name AS "projectName",c.number AS "contractNumber"
+    FROM tasks t JOIN projects pr ON pr.id=t."projectId"
+    LEFT JOIN contracts c ON c.id=t."contractId"
+    WHERE t."payrollId"=? AND t."personId"=? ORDER BY t.date,t.id`, l.payrollId, l.personId);
+  return { line: l, pdf: createReceiptPdf({
+    personName: l.personName,
+    jobTitle: l.jobTitle,
+    document: person.document,
+    kind: l.kind,
+    phone: person.phone,
+    email: person.email,
+    bank: person.bank,
+    account: person.account,
+    weekStart: l.weekStart,
+    weekEnd: l.weekEnd,
+    payrollId: l.payrollId,
+    projects: l.projectAllocations === null ? null : JSON.parse(l.projectAllocations),
+    days: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot),
+    tasks,
+    details: l.details,
+    observation: l.observation,
+    gross: l.gross,
+    deductions: l.deductions,
+    net: l.net,
+    paid: !!l.paid,
+    method: l.method,
+    reference: l.reference,
+    paidAt: l.paidAt
+  }) };
+}
+async function pdfBuffer(lineId) {
+  const receipt = await receiptForLine(lineId);
+  if (!receipt?.line.paid) throw new Error("El recibo a\xFAn no corresponde a un pago confirmado");
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    receipt.pdf.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    receipt.pdf.on("end", () => resolve(Buffer.concat(chunks)));
+    receipt.pdf.on("error", reject);
+    receipt.pdf.end();
+  });
+}
+async function sendWhatsapp(destination, pdf2, lineId, onNetworkStart) {
+  const phone = destination.replace(/[\s()+.-]/g, "");
+  if (!/^\d{8,15}$/.test(phone)) throw new Error("Tel\xE9fono sin indicativo internacional v\xE1lido");
+  const root = `https://graph.facebook.com/${process.env.ONEFIX_META_GRAPH_VERSION}/${process.env.ONEFIX_WHATSAPP_PHONE_ID}`;
+  const headers = { Authorization: `Bearer ${process.env.ONEFIX_WHATSAPP_TOKEN}` };
+  const data = new FormData();
+  data.append("messaging_product", "whatsapp");
+  data.append("file", new Blob([new Uint8Array(pdf2)], { type: "application/pdf" }), `ONEFIX-recibo-${lineId}.pdf`);
+  onNetworkStart();
+  const upload = await fetch(`${root}/media`, { method: "POST", headers, body: data, signal: AbortSignal.timeout(12e3) });
+  const media = await upload.json().catch(() => ({}));
+  if (!upload.ok || !media.id) throw new Error(`No se pudo subir el PDF a WhatsApp (HTTP ${upload.status})`);
+  const send = await fetch(`${root}/messages`, {
+    method: "POST",
+    signal: AbortSignal.timeout(12e3),
+    headers: { ...headers, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      messaging_product: "whatsapp",
+      to: phone,
+      type: "template",
+      template: {
+        name: process.env.ONEFIX_WHATSAPP_TEMPLATE,
+        language: { code: process.env.ONEFIX_WHATSAPP_LANGUAGE },
+        components: [{
+          type: "header",
+          parameters: [{ type: "document", document: { id: media.id, filename: `ONEFIX-recibo-${lineId}.pdf` } }]
+        }]
+      }
+    })
+  });
+  const result = await send.json().catch(() => ({}));
+  if (!send.ok || !result.messages?.[0]?.id) throw new Error(`WhatsApp no acept\xF3 el mensaje (HTTP ${send.status})`);
+  return result.messages[0].id;
+}
+async function dispatchReceipt(lineId) {
+  const claimed = await db.transaction(async () => {
+    const d = await row(`SELECT * FROM receipt_deliveries WHERE "lineId"=? FOR UPDATE`, lineId);
+    if (!d || !["pending", "failed", "configuration"].includes(d.status)) return null;
+    const ready = d.channel === "email" ? !!process.env.ONEFIX_RESEND_API_KEY && !!process.env.ONEFIX_FROM_EMAIL : d.channel === "whatsapp" && whatsappReady();
+    if (!ready) {
+      await run(
+        `UPDATE receipt_deliveries SET status=?, "lastError"=?, "updatedAt"=now() WHERE id=?`,
+        "configuration",
+        d.channel === "whatsapp" ? "Configura Meta y una plantilla PDF aprobada" : "Configura el proveedor de correo",
+        d.id
+      );
+      return null;
+    }
+    await run(`UPDATE receipt_deliveries SET status='sending',attempts=attempts+1,
+      "attemptedAt"=now(),"updatedAt"=now(),"lastError"='' WHERE id=?`, d.id);
+    return d;
+  })();
+  if (!claimed) return;
+  let networkStarted = false;
+  try {
+    const attachment = await pdfBuffer(lineId);
+    if (attachment.length > 2e7) throw new Error("El PDF es demasiado grande para enviarlo");
+    const payroll = await row(`SELECT p."weekStart",p."weekEnd" FROM payroll_lines l
+      JOIN payrolls p ON p.id=l."payrollId" WHERE l.id=?`, lineId);
+    if (!payroll) throw new Error("No se encontr\xF3 la n\xF3mina del recibo");
+    let providerId;
+    if (claimed.channel === "whatsapp") {
+      providerId = await sendWhatsapp(claimed.destination, attachment, lineId, () => {
+        networkStarted = true;
+      });
+    } else {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 12e3);
+      let response;
+      try {
+        networkStarted = true;
+        response = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          signal: controller.signal,
+          headers: {
+            Authorization: `Bearer ${process.env.ONEFIX_RESEND_API_KEY}`,
+            "Content-Type": "application/json",
+            "Idempotency-Key": `onefix-recibo-${lineId}`
+          },
+          body: JSON.stringify({
+            from: process.env.ONEFIX_FROM_EMAIL,
+            to: [claimed.destination],
+            subject: `ONEFIX | Comprobante de pago ${payroll.weekStart} al ${payroll.weekEnd}`,
+            text: `Adjuntamos tu comprobante de pago correspondiente al per\xEDodo ${payroll.weekStart} al ${payroll.weekEnd}. Si tienes alguna duda, comun\xEDcate con Administraci\xF3n de ONEFIX.`,
+            attachments: [{
+              filename: `ONEFIX-recibo-${lineId}.pdf`,
+              content: attachment.toString("base64"),
+              content_type: "application/pdf"
+            }]
+          })
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.id) {
+        networkStarted = response.status >= 500;
+        throw new Error(`El proveedor rechaz\xF3 el env\xEDo (HTTP ${response.status})`);
+      }
+      providerId = result.id;
+    }
+    await run(
+      `UPDATE receipt_deliveries SET status='accepted',"providerId"=?,
+      "acceptedAt"=now(),"lastError"='',"updatedAt"=now() WHERE id=?`,
+      providerId,
+      claimed.id
+    );
+  } catch (error) {
+    const uncertain = networkStarted;
+    await run(
+      `UPDATE receipt_deliveries SET status=?,"lastError"=?,"updatedAt"=now() WHERE id=?`,
+      uncertain ? "verify" : "failed",
+      uncertain ? "Resultado incierto; confirma el estado con el proveedor antes de reenviar" : error instanceof Error ? error.message.slice(0, 180) : "No se pudo preparar el recibo",
+      claimed.id
+    );
+  }
+}
+function registerReceiptDelivery(app) {
+  app.get("/api/receipt-deliveries", allow("administracion", "gerencia"), async (_req, res) => {
+    await run(`UPDATE receipt_deliveries SET status='verify',
+      "lastError"='La ejecuci\xF3n termin\xF3 sin confirmar la respuesta del proveedor; verifica antes de reenviar',
+      "updatedAt"=now() WHERE status='sending' AND "attemptedAt"<now()-INTERVAL '2 minutes'`);
+    const items = await rows(`SELECT d.id,d."lineId",d.channel,d.destination,d.status,d.attempts,
+      d."providerId",d."lastError",d."attemptedAt",d."acceptedAt",l."personName",l."payrollId"
+      FROM receipt_deliveries d JOIN payroll_lines l ON l.id=d."lineId" ORDER BY d.id DESC`);
+    res.json(items);
+  });
+  app.post("/api/receipt-deliveries/:lineId/retry", allow("administracion"), async (req, res) => {
+    const lineId = Number(req.params.lineId);
+    if (!Number.isSafeInteger(lineId) || lineId < 1) return res.status(400).json({ error: "Recibo inv\xE1lido" });
+    const outcome = await db.transaction(async () => {
+      const d = await row(`SELECT * FROM receipt_deliveries WHERE "lineId"=? FOR UPDATE`, lineId);
+      if (!d) return "not-found";
+      if (!["pending", "failed", "configuration", "missing_contact"].includes(d.status)) return "blocked";
+      const person = await row(`SELECT p.email,p.phone,p."receiptChannel" FROM payroll_lines l
+        JOIN people p ON p.id=l."personId" WHERE l.id=?`, lineId);
+      const email = String(person?.email || "").trim().toLowerCase();
+      const phone = String(person?.phone || "").trim();
+      const channel = person?.receiptChannel === "email" ? email ? "email" : "none" : person?.receiptChannel === "whatsapp" ? phone ? "whatsapp" : "none" : email ? "email" : phone ? "whatsapp" : "none";
+      const destination = channel === "email" ? email : channel === "whatsapp" ? phone : "";
+      if (!destination) return "missing";
+      await run(`UPDATE receipt_deliveries SET channel=?,destination=?,status='pending',
+        "lastError"='',"updatedAt"=now() WHERE id=?`, channel, destination, d.id);
+      return "ready";
+    })();
+    if (outcome === "not-found") return res.status(404).json({ error: "No hay entrega para este pago" });
+    if (outcome === "blocked") return res.status(409).json({ error: "Una entrega aceptada o incierta no se reenv\xEDa. Confirma primero su estado con el proveedor." });
+    if (outcome === "missing") return res.status(409).json({ error: "Actualiza en la ficha el contacto del canal elegido antes de reintentar." });
+    await dispatchReceipt(lineId);
+    await audit(req.currentUser.id, "receipt-delivery-retry", String(lineId));
+    res.json(await row(`SELECT status,"lastError","acceptedAt" FROM receipt_deliveries WHERE "lineId"=?`, lineId));
+  });
+  app.post("/api/receipt-deliveries/:lineId/resolve", allow("administracion"), async (req, res) => {
+    const lineId = Number(req.params.lineId);
+    if (!Number.isSafeInteger(lineId) || lineId < 1 || req.body?.confirmedNotSent !== true)
+      return res.status(400).json({ error: "Confirma el resultado con el proveedor antes de liberar el reintento" });
+    const changed = await db.transaction(async () => {
+      const result = await run(`UPDATE receipt_deliveries SET status='failed',
+        "lastError"='Administraci\xF3n comprob\xF3 con el proveedor que no se envi\xF3; reintento autorizado',
+        "updatedAt"=now() WHERE "lineId"=? AND status='verify'`, lineId);
+      if (result.changes) await audit(req.currentUser.id, "receipt-delivery-confirm-not-sent", String(lineId));
+      return result.changes;
+    })();
+    if (!changed) return res.status(409).json({ error: "Este recibo ya cambi\xF3 de estado; actualiza la vista" });
+    res.json({ ok: true });
+  });
+}
+
 // server/routes.ts
 function issue2(res, e) {
   let message = e && typeof e === "object" && "issues" in e && Array.isArray(e.issues) ? e.issues[0]?.message || "Revisa los datos del formulario" : e instanceof Error ? e.message : "No se pudo completar la operaci\xF3n";
@@ -1248,16 +1497,17 @@ async function registerRoutes(httpServer, app) {
     return requireAuth(req, res, next);
   });
   app.use("/api", (req, res, next) => {
-    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "Esta operaci\xF3n no est\xE1 habilitada. N\xF3mina y pagos solo se gestionan por Administraci\xF3n y Gerencia, seg\xFAn su etapa de aprobaci\xF3n." });
     }
-    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "La n\xF3mina y los pagos siguen bloqueados." });
     }
     next();
   });
   registerContractTracking(app);
   registerReceivables(app);
+  registerReceiptDelivery(app);
   app.get("/api/state", async (req, res) => {
     const production = req.currentUser.role === "produccion";
     const realProduction = production && process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1";
@@ -1298,7 +1548,7 @@ async function registerRoutes(httpServer, app) {
         throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
       if (await row("SELECT id FROM people WHERE lower(document)=lower(?)", p.document))
         throw new Error("Ya existe una persona con ese documento");
-      const result = await run("INSERT INTO people (name,kind,jobTitle,document,phone,email,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0);
+      const result = await run("INSERT INTO people (name,kind,jobTitle,document,phone,email,receiptChannel,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.jobTitle, p.document, p.phone, p.email, p.receiptChannel, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0);
       await audit(req.currentUser.id, "person-create", String(result.lastInsertRowid));
       res.json({ id: result.lastInsertRowid });
     } catch (e) {
@@ -1327,7 +1577,7 @@ async function registerRoutes(httpServer, app) {
         throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
       if (await row("SELECT id FROM people WHERE lower(document)=lower(?) AND id<>?", p.document, original.id))
         throw new Error("Ya existe una persona con ese documento");
-      await run("UPDATE people SET name=?,jobTitle=?,document=?,phone=?,email=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id);
+      await run("UPDATE people SET name=?,jobTitle=?,document=?,phone=?,email=?,receiptChannel=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.jobTitle, p.document, p.phone, p.email, p.receiptChannel, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id);
       await audit(req.currentUser.id, "person-update", String(original.id));
       res.json({ ok: true });
     } catch (e) {
@@ -1758,9 +2008,12 @@ async function registerRoutes(httpServer, app) {
         );
         if (changed.changes !== 1)
           throw new Error("El pago ya est\xE1 registrado o la n\xF3mina no est\xE1 aprobada");
+        await enqueueReceipt(lineId);
         await audit(req.currentUser.id, "payment", String(lineId));
       })();
-      res.json({ ok: true });
+      await dispatchReceipt(lineId).catch(() => {
+      });
+      res.json({ ok: true, delivery: await row(`SELECT status,"lastError" FROM receipt_deliveries WHERE "lineId"=?`, lineId) });
     } catch (e) {
       issue2(res, e);
     }
@@ -1790,14 +2043,24 @@ async function registerRoutes(httpServer, app) {
           if (!changed.changes)
             return { operationId, status: "conflict", message: "Pago modificado en otro dispositivo" };
           await run("INSERT INTO payment_events(operationId,lineId,userId,method,reference,recordedAt,syncedAt) VALUES (?,?,?,?,?,?,?)", operationId, lineId, req.currentUser.id, method, reference, recordedAt, (/* @__PURE__ */ new Date()).toISOString());
+          await enqueueReceipt(lineId);
           await audit(req.currentUser.id, "payment-sync", String(lineId));
-          return { operationId, status: "synced", lineId };
+          return { operationId, status: "synced", lineId, newlyPaid: true };
         })();
       } catch {
         return { operationId, status: "conflict", message: "No se pudo registrar. Verifica con Administraci\xF3n" };
       }
     });
-    res.json({ results: await Promise.all(results) });
+    const processed = await Promise.all(results);
+    for (const item of processed) {
+      if ("newlyPaid" in item && item.newlyPaid && "lineId" in item && typeof item.lineId === "number")
+        await dispatchReceipt(item.lineId).catch(() => {
+        });
+    }
+    res.json({ results: processed.map((item) => {
+      const { newlyPaid, ...safe } = item;
+      return safe;
+    }) });
   });
   app.get("/api/payrolls/:id/pdf/:type", allow("administracion", "gerencia"), async (req, res) => {
     const p = await row("SELECT * FROM payrolls WHERE id=?", Number(req.params.id));
@@ -1906,40 +2169,13 @@ async function registerRoutes(httpServer, app) {
     });
   });
   app.get("/api/lines/:id/pdf", allow("administracion", "gerencia"), async (req, res) => {
-    const l = await row("SELECT l.*,p.weekStart,p.weekEnd,p.status FROM payroll_lines l JOIN payrolls p ON p.id=l.payrollId WHERE l.id=?", Number(req.params.id));
-    if (!l || l.status !== "aprobado")
+    const receipt = await receiptForLine(Number(req.params.id));
+    if (!receipt)
       return res.status(404).json({ error: "Recibo disponible tras la aprobaci\xF3n" });
-    const person = await row("SELECT * FROM people WHERE id=?", l.personId);
-    const includedTasks = await rows("SELECT t.*,pr.name AS projectName,c.number AS contractNumber FROM tasks t JOIN projects pr ON pr.id=t.projectId LEFT JOIN contracts c ON c.id=t.contractId WHERE t.payrollId=? AND t.personId=? ORDER BY t.date,t.id", l.payrollId, l.personId);
-    const receipt = createReceiptPdf({
-      personName: l.personName,
-      jobTitle: l.jobTitle,
-      document: person.document,
-      kind: l.kind,
-      phone: person.phone,
-      email: person.email,
-      bank: person.bank,
-      account: person.account,
-      weekStart: l.weekStart,
-      weekEnd: l.weekEnd,
-      payrollId: l.payrollId,
-      projects: l.projectAllocations === null ? null : JSON.parse(l.projectAllocations),
-      days: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot),
-      tasks: includedTasks,
-      details: l.details,
-      observation: l.observation,
-      gross: l.gross,
-      deductions: l.deductions,
-      net: l.net,
-      paid: !!l.paid,
-      method: l.method,
-      reference: l.reference,
-      paidAt: l.paidAt
-    });
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
-    receipt.pipe(res);
-    receipt.end();
+    res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${receipt.line.payrollId}-${receipt.line.id}.pdf"`);
+    receipt.pdf.pipe(res);
+    receipt.pdf.end();
   });
   app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
     const d = await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id));
@@ -1959,6 +2195,7 @@ async function createApp() {
   await verifyDatabase();
   await ensureContractTrackingSchema();
   await ensureReceivablesSchema();
+  await ensureReceiptDeliverySchema();
   const app = express();
   const httpServer = createServer(app);
   app.use(express.json({

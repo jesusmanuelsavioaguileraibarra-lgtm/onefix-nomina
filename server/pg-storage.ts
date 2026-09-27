@@ -17,7 +17,7 @@ const columns = new Set([
   "personId","projectId","contractId","payrollId","attendanceId","deductionId","lineId","userId",
   "operationId","weekStart","weekEnd","submittedAt","reviewedAt","approvedAt","reviewedBy",
   "approvedBy","personName","payType","overtimeRate","overtimeEnabled","authorizedAmount",
-  "jobTitle",
+  "jobTitle","receiptChannel",
   "projectName","timeIn","timeOut","breakMinutes","dailyAmount","currentRevision","expectedRevision",
   "submittedBy","resolvedBy","resolvedAt","currentProject","currentTimeIn","currentTimeOut",
   "currentResponsible","currentBreakMinutes","currentHours","currentOvertime","currentBonus",
