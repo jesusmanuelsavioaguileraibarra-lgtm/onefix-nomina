@@ -145,7 +145,7 @@ if (!connectionString || !/^postgres(?:ql)?:\/\//.test(connectionString)) {
 if (process.env.ONEFIX_DEMO_ACCESS === "1") {
   throw new Error("Los PIN demo no se permiten en la base de datos de producci\xF3n.");
 }
-var pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 1e4, idleTimeoutMillis: 3e4 });
+var pool = new Pool({ connectionString, max: 2, connectionTimeoutMillis: 2e4, idleTimeoutMillis: 3e4 });
 var context = new AsyncLocalStorage();
 var columns = /* @__PURE__ */ new Set([
   "personId",
@@ -334,8 +334,17 @@ var db = {
   }
 };
 async function verifyDatabase() {
-  const result = await row("SELECT count(*)::int AS total FROM pg_tables WHERE schemaname='public' AND tablename IN ('people','projects','contracts','amendments','tasks','attendance','deductions','payrolls','payroll_lines','payment_events','payroll_revisions','payroll_absence_adjustments','daily_pays','app_users','attendance_conflicts','app_sessions','app_invites','app_downloads','audit_log')");
-  if (result?.total !== 19) throw new Error("El esquema PostgreSQL ONEFIX est\xE1 incompleto. No se iniciar\xE1 el servidor.");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await row("SELECT count(*)::int AS total FROM pg_tables WHERE schemaname='public' AND tablename IN ('people','projects','contracts','amendments','tasks','attendance','deductions','payrolls','payroll_lines','payment_events','payroll_revisions','payroll_absence_adjustments','daily_pays','app_users','attendance_conflicts','app_sessions','app_invites','app_downloads','audit_log')");
+      if (result?.total !== 19) throw new Error("El esquema PostgreSQL ONEFIX est\xE1 incompleto. No se iniciar\xE1 el servidor.");
+      return;
+    } catch (error) {
+      const transient = /connection timeout|connection terminated|ECONNRESET|ETIMEDOUT/i.test(String(error));
+      if (!transient || attempt === 1) throw error;
+      console.warn("ONEFIX database cold-start connection timed out; retrying once.");
+    }
+  }
 }
 
 // server/storage.ts
@@ -1602,10 +1611,14 @@ async function createApp() {
 }
 
 // server/vercel-entry.ts
-var appPromise = createApp().then(({ app }) => app);
+var appPromise;
 async function handler(req, res) {
   try {
-    const app = await appPromise;
+    appPromise ??= createApp().catch((error) => {
+      appPromise = void 0;
+      throw error;
+    });
+    const { app } = await appPromise;
     app(req, res);
   } catch (error) {
     console.error("ONEFIX API initialization failed:", error);

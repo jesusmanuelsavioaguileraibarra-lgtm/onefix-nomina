@@ -9,7 +9,9 @@ if (!connectionString || !/^postgres(?:ql)?:\/\//.test(connectionString)) {
 if (process.env.ONEFIX_DEMO_ACCESS === "1") {
   throw new Error("Los PIN demo no se permiten en la base de datos de producción.");
 }
-const pool = new Pool({ connectionString, max: 5, connectionTimeoutMillis: 10000, idleTimeoutMillis: 30000 });
+// Vercel may start several cold instances while Neon is accepting new connections.
+// Keep each instance's footprint small and allow the pooled endpoint time to wake up.
+const pool = new Pool({ connectionString, max: 2, connectionTimeoutMillis: 20000, idleTimeoutMillis: 30000 });
 const context = new AsyncLocalStorage<PoolClient>();
 const columns = new Set([
   "personId","projectId","contractId","payrollId","attendanceId","deductionId","lineId","userId",
@@ -119,6 +121,15 @@ export const db = {
   },
 };
 export async function verifyDatabase(): Promise<void> {
-  const result = await row("SELECT count(*)::int AS total FROM pg_tables WHERE schemaname='public' AND tablename IN ('people','projects','contracts','amendments','tasks','attendance','deductions','payrolls','payroll_lines','payment_events','payroll_revisions','payroll_absence_adjustments','daily_pays','app_users','attendance_conflicts','app_sessions','app_invites','app_downloads','audit_log')");
-  if (result?.total !== 19) throw new Error("El esquema PostgreSQL ONEFIX está incompleto. No se iniciará el servidor.");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await row("SELECT count(*)::int AS total FROM pg_tables WHERE schemaname='public' AND tablename IN ('people','projects','contracts','amendments','tasks','attendance','deductions','payrolls','payroll_lines','payment_events','payroll_revisions','payroll_absence_adjustments','daily_pays','app_users','attendance_conflicts','app_sessions','app_invites','app_downloads','audit_log')");
+      if (result?.total !== 19) throw new Error("El esquema PostgreSQL ONEFIX está incompleto. No se iniciará el servidor.");
+      return;
+    } catch (error) {
+      const transient = /connection timeout|connection terminated|ECONNRESET|ETIMEDOUT/i.test(String(error));
+      if (!transient || attempt === 1) throw error;
+      console.warn("ONEFIX database cold-start connection timed out; retrying once.");
+    }
+  }
 }
