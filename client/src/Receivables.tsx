@@ -28,6 +28,7 @@ export default function Receivables({offline}:{offline:boolean}) {
   });
   const [search,setSearch]=useState("");
   const [filter,setFilter]=useState("todas");
+  const [page,setPage]=useState(0);
   const [editing,setEditing]=useState<Invoice|null>(null);
   const [saving,setSaving]=useState(false);
   const [error,setError]=useState("");
@@ -40,6 +41,10 @@ export default function Receivables({offline}:{offline:boolean}) {
         ||filter==="canceladas"&&i.cancelled||filter==="sin-fecha"&&!i.due_date&&!i.cancelled
         ||filter==="vencidas"&&status(i,today)==="Vencida");
   }),[items,search,filter,today]);
+  const pageSize=25;
+  const pageCount=Math.ceil(visible.length/pageSize);
+  const currentPage=Math.min(page,Math.max(0,pageCount-1));
+  const pageItems=visible.slice(currentPage*pageSize,(currentPage+1)*pageSize);
   const collectible=visible.filter(i=>!i.cancelled&&i.invoice_number.startsWith("INV")).reduce((sum,i)=>sum+Math.max(0,(i.balance_2025_cents||0)+(i.balance_2026_cents||0)),0);
   async function save(event:React.FormEvent<HTMLFormElement>){
     event.preventDefault();
@@ -62,8 +67,8 @@ export default function Receivables({offline}:{offline:boolean}) {
     {isError&&<div className="feedback error" role="alert">No se pudieron cargar las facturas. <button onClick={()=>refetch()} data-testid="button-retry-receivables">Reintentar</button></div>}
     {message&&<div className="feedback success" role="status">{message}</div>}
     {!offline&&<><div className="tracking-filters">
-      <label className="field"><span>Buscar factura, job, cliente u observación</span><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar en el archivo" data-testid="input-search-receivables"/></label>
-      <label className="field"><span>Mostrar</span><select value={filter} onChange={e=>setFilter(e.target.value)} data-testid="select-receivables-filter">
+      <label className="field"><span>Buscar factura, job, cliente u observación</span><input value={search} onChange={e=>{setSearch(e.target.value);setPage(0);}} placeholder="Buscar en el archivo" data-testid="input-search-receivables"/></label>
+      <label className="field"><span>Mostrar</span><select value={filter} onChange={e=>{setFilter(e.target.value);setPage(0);}} data-testid="select-receivables-filter">
         <option value="todas">Todas</option><option value="revisar">Por verificar</option><option value="sin-fecha">Sin vencimiento</option><option value="vencidas">Vencidas</option><option value="canceladas">Canceladas</option>
       </select></label>
     </div>
@@ -71,15 +76,36 @@ export default function Receivables({offline}:{offline:boolean}) {
       <div><span>Por verificar</span><b>{visible.filter(i=>!!i.review_reasons).length}</b></div>
       <div><span>Sin vencimiento</span><b>{visible.filter(i=>!i.due_date&&!i.cancelled).length}</b></div>
       <div><span>Saldo positivo informado en facturas no canceladas</span><b data-testid="text-collectible">{usd(collectible)}</b></div></div>
-    <section className="panel"><div className="panel-head"><div><h2>Detalle de facturas</h2><p>El saldo mostrado procede de las columnas 2025 y 2026 del archivo; no equivale a un importe conciliado.</p></div></div>
-      {isLoading?<div className="empty">Cargando facturas…</div>:visible.length?<div className="table-wrap"><table><thead><tr><th>Fila</th><th>Factura</th><th>Job / cliente</th><th>Fecha emisión</th><th>Importe</th><th>Pagos</th><th>Saldo 2025</th><th>Saldo 2026</th><th>Vencimiento</th><th>Estado / revisión</th><th>Observaciones</th><th>Acción</th></tr></thead>
-        <tbody>{visible.map(i=><tr key={i.id} data-testid={`receivable-row-${i.source_row}`}>
-          <td>{i.source_row}</td><td><b>{i.invoice_number||"Sin número"}</b></td><td>{i.job||"Sin job"}<small>{i.client||"Cliente no indicado"}</small></td>
-          <td>{i.issue_date||i.raw_date||"No indicada"}{!i.issue_date&&!!i.raw_date&&<small>Revisar fecha</small>}</td>
-          <td>{usd(i.gross_cents)}</td><td>{usd(i.paid_cents)}</td><td>{usd(i.balance_2025_cents)}</td><td>{usd(i.balance_2026_cents)}</td>
-          <td>{i.due_date||"Sin definir"}</td><td>{status(i,today)}{!!i.review_reasons&&<small className="tracking-flag">{i.review_reasons}</small>}</td>
-          <td className="details">{i.note||"—"}</td><td><button className="table-action" data-testid={`button-due-date-${i.source_row}`} onClick={()=>{setEditing(i);setError("");}}>Vencimiento</button></td>
-        </tr>)}</tbody></table></div>:<div className="empty"><h3>{items.length?"Sin coincidencias":"Aún no hay facturas"}</h3><p>{items.length?"Prueba otro filtro o búsqueda.":"El archivo debe importarse antes de comenzar a fijar vencimientos."}</p></div>}</section></>}
+    <section className="panel"><div className="panel-head"><div><h2>Detalle de facturas</h2><p>Abre cada factura para ver todos sus importes y observaciones. Los saldos del archivo no equivalen a importes conciliados.</p></div></div>
+      {isLoading?<div className="empty">Cargando facturas…</div>:visible.length?<><div className="receivable-list">
+        {pageItems.map(i=><details className="receivable-item" key={i.id} data-testid={`receivable-row-${i.source_row}`}>
+          <summary data-testid={`summary-receivable-${i.source_row}`}>
+            <span className="receivable-id"><b>{i.invoice_number||"Sin número"}</b><small>Fila {i.source_row} del Excel</small></span>
+            <span className="receivable-party"><b>{i.client||"Cliente no indicado"}</b><small>Job: {i.job||"Sin job"}</small></span>
+            <span className="receivable-amount"><small>Saldo 2025 + 2026</small><b>{i.balance_2025_cents===null&&i.balance_2026_cents===null?"No indicado":usd((i.balance_2025_cents||0)+(i.balance_2026_cents||0))}</b></span>
+            <span className="receivable-state"><b>{status(i,today)}</b><small>{i.due_date?`Vence: ${i.due_date}`:i.review_reasons?"Por verificar":"Vencimiento sin definir"}</small></span>
+            <span className="receivable-cue" aria-hidden="true">⌄</span>
+          </summary>
+          <div className="receivable-detail">
+            <dl className="receivable-fields">
+              <div><dt>Fecha de emisión</dt><dd>{i.issue_date||i.raw_date||"No indicada"}{!i.issue_date&&!!i.raw_date&&" (revisar)"}</dd></div>
+              <div><dt>Importe original</dt><dd>{usd(i.gross_cents)}</dd></div>
+              <div><dt>Pagos informados</dt><dd>{usd(i.paid_cents)}</dd></div>
+              <div><dt>Saldo 2025</dt><dd>{usd(i.balance_2025_cents)}</dd></div>
+              <div><dt>Saldo 2026</dt><dd>{usd(i.balance_2026_cents)}</dd></div>
+              <div><dt>Vencimiento</dt><dd>{i.due_date||"Sin definir"}</dd></div>
+            </dl>
+            {i.review_reasons&&<p className="receivable-review"><strong>Por verificar:</strong> {i.review_reasons}</p>}
+            <p className="receivable-note"><strong>Observaciones:</strong> {i.note||"Ninguna en el archivo"}</p>
+            <button className="btn outline" data-testid={`button-due-date-${i.source_row}`} onClick={()=>{setEditing(i);setError("");}}>Editar vencimiento</button>
+          </div>
+        </details>)}
+      </div>
+      <nav className="receivable-pagination" aria-label="Páginas de facturas">
+        <span data-testid="text-receivable-range">Mostrando {currentPage*pageSize+1}–{Math.min((currentPage+1)*pageSize,visible.length)} de {visible.length} filas · Página {currentPage+1} de {pageCount}</span>
+        <div><button className="btn outline" disabled={currentPage===0} onClick={()=>setPage(currentPage-1)} data-testid="button-previous-receivables">Anterior</button>
+          <button className="btn outline" disabled={currentPage>=pageCount-1} onClick={()=>setPage(currentPage+1)} data-testid="button-next-receivables">Siguiente</button></div>
+      </nav></>:<div className="empty"><h3>{items.length?"Sin coincidencias":"Aún no hay facturas"}</h3><p>{items.length?"Prueba otro filtro o búsqueda.":"El archivo debe importarse antes de comenzar a fijar vencimientos."}</p></div>}</section></>}
     {editing&&<div className="overlay" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setEditing(null);}}><div className="dialog" role="dialog" aria-modal="true" aria-label="Editar vencimiento">
       <div className="dialog-head"><div><span className="eyebrow">FECHA MANUAL</span><h2>{editing.invoice_number||`Fila ${editing.source_row}`}</h2></div><button className="icon-button" onClick={()=>setEditing(null)} aria-label="Cerrar">×</button></div>
       <form onSubmit={save} className="dialog-body"><p>Define la fecha de vencimiento solamente si está confirmada. Puedes dejarla vacía.</p>
