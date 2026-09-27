@@ -57,6 +57,13 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return requireAuth(req, res, next);
     });
     app.use("/api", (req, res, next) => {
+        // Real employee intake is intentionally online-only. Payroll and payment
+        // operations remain locked until their production controls are verified.
+        if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1"
+            && !["GET", "HEAD", "OPTIONS"].includes(req.method)
+            && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))) {
+            return res.status(423).json({ error: "La carga real solo permite registrar y corregir personas. Asistencia, nómina y pagos siguen bloqueados hasta su validación." });
+        }
         if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method)
             && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")) {
             return res.status(423).json({ error: "Hasta el 26/09/2026 solo se permite cargar y corregir fichas de personas. La asistencia, nómina y pagos se habilitan mañana." });
@@ -88,6 +95,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     app.post("/api/people", allow("produccion", "administracion"), async (req, res) => {
         try {
             const p = personInput.parse(req.body);
+            if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
+                throw new Error("La carga real solo admite empleados");
             if (req.currentUser!.role === "produccion" && p.kind !== "empleado")
                 throw new Error("Producción solo puede registrar empleados");
             if (p.kind === "empleado" && p.payType === "tareas")
@@ -112,6 +121,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             if (!original)
                 throw new Error("Persona no encontrada");
             const p = personInput.parse(req.body);
+            if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
+                throw new Error("La carga real solo admite empleados");
             if (req.currentUser!.role === "produccion" && original.kind !== "empleado")
                 throw new Error("Producción solo puede editar empleados");
             if (p.kind !== original.kind)

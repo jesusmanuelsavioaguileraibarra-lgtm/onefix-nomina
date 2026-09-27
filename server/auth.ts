@@ -139,6 +139,7 @@ export function registerAuth(app: Express) {
         setupAvailable: !!process.env.ONEFIX_SETUP_TOKEN,
         demoAccess: (await availableDemoRoles()).length > 0,
         demoRoles: (await availableDemoRoles()),
+        personnelIntake: process.env.NODE_ENV === "production" && !demoAccess(),
     }));
     app.post("/api/auth/setup", async (req, res) => {
         if ((await row("SELECT id FROM app_users LIMIT 1")))

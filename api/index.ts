@@ -666,7 +666,8 @@ function registerAuth(app) {
     hasUsers: !!await row("SELECT id FROM app_users LIMIT 1"),
     setupAvailable: !!process.env.ONEFIX_SETUP_TOKEN,
     demoAccess: (await availableDemoRoles()).length > 0,
-    demoRoles: await availableDemoRoles()
+    demoRoles: await availableDemoRoles(),
+    personnelIntake: process.env.NODE_ENV === "production" && !demoAccess()
   }));
   app.post("/api/auth/setup", async (req, res) => {
     if (await row("SELECT id FROM app_users LIMIT 1"))
@@ -800,6 +801,9 @@ async function registerRoutes(httpServer, app) {
     return requireAuth(req, res, next);
   });
   app.use("/api", (req, res, next) => {
+    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))) {
+      return res.status(423).json({ error: "La carga real solo permite registrar y corregir personas. Asistencia, n\xF3mina y pagos siguen bloqueados hasta su validaci\xF3n." });
+    }
     if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")) {
       return res.status(423).json({ error: "Hasta el 26/09/2026 solo se permite cargar y corregir fichas de personas. La asistencia, n\xF3mina y pagos se habilitan ma\xF1ana." });
     }
@@ -830,6 +834,8 @@ async function registerRoutes(httpServer, app) {
   app.post("/api/people", allow("produccion", "administracion"), async (req, res) => {
     try {
       const p = personInput.parse(req.body);
+      if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
+        throw new Error("La carga real solo admite empleados");
       if (req.currentUser.role === "produccion" && p.kind !== "empleado")
         throw new Error("Producci\xF3n solo puede registrar empleados");
       if (p.kind === "empleado" && p.payType === "tareas")
@@ -853,6 +859,8 @@ async function registerRoutes(httpServer, app) {
       if (!original)
         throw new Error("Persona no encontrada");
       const p = personInput.parse(req.body);
+      if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
+        throw new Error("La carga real solo admite empleados");
       if (req.currentUser.role === "produccion" && original.kind !== "empleado")
         throw new Error("Producci\xF3n solo puede editar empleados");
       if (p.kind !== original.kind)
