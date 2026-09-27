@@ -755,6 +755,99 @@ function hashBuffer(input) {
   return createHash("sha256").update(input).digest();
 }
 
+// server/contract-tracking.ts
+import { z as z2 } from "zod";
+var contractInput2 = z2.object({
+  number: z2.string().trim().max(40).default(""),
+  project: z2.string().trim().min(1).max(240),
+  subcontractor: z2.string().trim().min(1).max(180),
+  work: z2.string().trim().min(1).max(1e3),
+  valueCents: z2.number().int().min(0).max(1e9),
+  appliedCents: z2.number().int().min(0).max(1e9),
+  status: z2.enum(["Activo", "Por aprobar", "Por definir", "Retenci\xF3n", "Compensaci\xF3n", "Terminado", "Pagado"]),
+  note: z2.string().trim().max(3e3).default(""),
+  needsReview: z2.boolean().default(false)
+});
+async function ensureContractTrackingSchema() {
+  await run(`CREATE TABLE IF NOT EXISTS contract_tracking (
+    id BIGSERIAL PRIMARY KEY,
+    number TEXT NOT NULL DEFAULT '',
+    project TEXT NOT NULL,
+    subcontractor TEXT NOT NULL,
+    work TEXT NOT NULL,
+    "valueCents" INTEGER NOT NULL CHECK ("valueCents" >= 0),
+    "appliedCents" INTEGER NOT NULL CHECK ("appliedCents" >= 0),
+    status TEXT NOT NULL,
+    note TEXT NOT NULL DEFAULT '',
+    "needsReview" BOOLEAN NOT NULL DEFAULT FALSE,
+    "updatedAt" TIMESTAMPTZ NOT NULL DEFAULT now(),
+    "updatedBy" BIGINT REFERENCES app_users(id)
+  )`);
+}
+function registerContractTracking(app) {
+  app.get("/api/contract-tracking", allow("administracion", "gerencia"), async (_req, res) => {
+    const items = await rows(`SELECT id, number, project, subcontractor, work, "valueCents", "appliedCents",
+      status, note, "needsReview", "updatedAt" FROM contract_tracking ORDER BY id DESC`);
+    res.json(items);
+  });
+  app.post("/api/contract-tracking", allow("administracion"), async (req, res) => {
+    const parsed = contractInput2.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "Revisa el contrato" });
+    const c = parsed.data;
+    try {
+      const item = await db.transaction(async () => {
+        const duplicate = c.number && await row(`SELECT id FROM contract_tracking WHERE number=? LIMIT 1`, c.number);
+        if (duplicate && !c.needsReview) throw new Error("El n\xFAmero ya existe: marca el registro \xABPor verificar\xBB antes de guardarlo.");
+        const review = c.needsReview || !c.number || !!duplicate || c.appliedCents > c.valueCents || c.status === "Pagado" && c.valueCents !== c.appliedCents;
+        const created = await row(
+          `INSERT INTO contract_tracking
+          (number,project,subcontractor,work,"valueCents","appliedCents",status,note,"needsReview","updatedBy")
+          VALUES (?,?,?,?,?,?,?,?,?,?) RETURNING *`,
+          c.number,
+          c.project,
+          c.subcontractor,
+          c.work,
+          c.valueCents,
+          c.appliedCents,
+          c.status,
+          c.note,
+          review,
+          req.currentUser.id
+        );
+        await audit(req.currentUser.id, "contract_tracking_create", String(created.id));
+        return created;
+      })();
+      res.status(201).json(item);
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : "No se pudo guardar" });
+    }
+  });
+  app.patch("/api/contract-tracking/:id", allow("administracion"), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: "Contrato inv\xE1lido" });
+    const parsed = contractInput2.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.issues[0]?.message || "Revisa el contrato" });
+    const c = parsed.data;
+    try {
+      const item = await db.transaction(async () => {
+        const existing = await row(`SELECT id FROM contract_tracking WHERE id=?`, id);
+        if (!existing) throw new Error("El contrato no existe");
+        const duplicate = c.number && await row(`SELECT id FROM contract_tracking WHERE number=? AND id<>? LIMIT 1`, c.number, id);
+        if (duplicate && !c.needsReview) throw new Error("El n\xFAmero est\xE1 repetido: resu\xE9lvelo o marca \xABPor verificar\xBB.");
+        const review = c.needsReview || !c.number || !!duplicate || c.appliedCents > c.valueCents || c.status === "Pagado" && c.valueCents !== c.appliedCents;
+        const updated = await row(`UPDATE contract_tracking SET number=?,project=?,subcontractor=?,work=?,
+          "valueCents"=?,"appliedCents"=?,status=?,note=?,"needsReview"=?,"updatedAt"=now(),"updatedBy"=?
+          WHERE id=? RETURNING *`, c.number, c.project, c.subcontractor, c.work, c.valueCents, c.appliedCents, c.status, c.note, review, req.currentUser.id, id);
+        await audit(req.currentUser.id, "contract_tracking_update", String(id));
+        return updated;
+      })();
+      res.json(item);
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : "No se pudo guardar" });
+    }
+  });
+}
+
 // server/routes.ts
 function issue2(res, e) {
   let message = e && typeof e === "object" && "issues" in e && Array.isArray(e.issues) ? e.issues[0]?.message || "Revisa los datos del formulario" : e instanceof Error ? e.message : "No se pudo completar la operaci\xF3n";
@@ -801,14 +894,15 @@ async function registerRoutes(httpServer, app) {
     return requireAuth(req, res, next);
   });
   app.use("/api", (req, res, next) => {
-    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))) {
+    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "La carga real solo permite registrar y corregir personas. Asistencia, n\xF3mina y pagos siguen bloqueados hasta su validaci\xF3n." });
     }
-    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")) {
+    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "Hasta el 26/09/2026 solo se permite cargar y corregir fichas de personas. La asistencia, n\xF3mina y pagos se habilitan ma\xF1ana." });
     }
     next();
   });
+  registerContractTracking(app);
   app.get("/api/state", async (req, res) => {
     const payrolls = await Promise.all((await all("payrolls")).map(payrollFull));
     const production = req.currentUser.role === "produccion";
@@ -1592,6 +1686,7 @@ async function registerRoutes(httpServer, app) {
 // server/app.ts
 async function createApp() {
   await verifyDatabase();
+  await ensureContractTrackingSchema();
   const app = express();
   const httpServer = createServer(app);
   app.use(express.json({

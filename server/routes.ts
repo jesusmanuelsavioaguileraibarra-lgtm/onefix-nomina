@@ -10,6 +10,7 @@ import { payrollPeriod } from "@shared/payrollPeriod";
 import { initialLoadOnly } from "@shared/activation";
 import { all, dateValid, db, generatePayroll, money, payrollFull, row, rows, run } from "./storage";
 import { registerAuth, requireAuth, downloadAuth, allow, audit } from "./auth";
+import { registerContractTracking } from "./contract-tracking";
 function issue(res: any, e: unknown) {
     let message = e && typeof e === "object" && "issues" in e && Array.isArray((e as any).issues)
         ? (e as any).issues[0]?.message || "Revisa los datos del formulario"
@@ -61,15 +62,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         // operations remain locked until their production controls are verified.
         if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1"
             && !["GET", "HEAD", "OPTIONS"].includes(req.method)
-            && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))) {
+            && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))
+            && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
             return res.status(423).json({ error: "La carga real solo permite registrar y corregir personas. Asistencia, nómina y pagos siguen bloqueados hasta su validación." });
         }
         if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method)
-            && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")) {
+            && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")
+            && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
             return res.status(423).json({ error: "Hasta el 26/09/2026 solo se permite cargar y corregir fichas de personas. La asistencia, nómina y pagos se habilitan mañana." });
         }
         next();
     });
+    registerContractTracking(app);
     app.get("/api/state", async (req, res) => {
         const payrolls = await Promise.all((await all("payrolls")).map(payrollFull));
         const production = req.currentUser!.role === "produccion";
