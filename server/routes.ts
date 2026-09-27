@@ -11,6 +11,7 @@ import { initialLoadOnly } from "@shared/activation";
 import { all, dateValid, db, generatePayroll, money, payrollFull, row, rows, run } from "./storage";
 import { registerAuth, requireAuth, downloadAuth, allow, audit } from "./auth";
 import { registerContractTracking } from "./contract-tracking";
+import { createReceiptPdf } from "./receipt-pdf";
 function issue(res: any, e: unknown) {
     let message = e && typeof e === "object" && "issues" in e && Array.isArray((e as any).issues)
         ? (e as any).issues[0]?.message || "Revisa los datos del formulario"
@@ -773,143 +774,20 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             return res.status(404).json({ error: "Recibo disponible tras la aprobación" });
         const person = (await row("SELECT * FROM people WHERE id=?", l.personId));
         const includedTasks = (await rows("SELECT t.*,pr.name AS projectName,c.number AS contractNumber FROM tasks t JOIN projects pr ON pr.id=t.projectId LEFT JOIN contracts c ON c.id=t.contractId WHERE t.payrollId=? AND t.personId=? ORDER BY t.date,t.id", l.payrollId, l.personId));
-        await pdf(res, `ONEFIX-recibo-${l.payrollId}-${l.id}.pdf`, doc => {
-            doc.font("Helvetica-Bold").fontSize(16).text("Comprobante individual de pago");
-            doc.moveDown();
-            line(doc, "Persona", l.personName);
-            line(doc, "Documento", person.document);
-            line(doc, "Tipo", l.kind);
-            line(doc, "Teléfono", person.phone);
-            line(doc, "Correo", person.email || "No registrado");
-            line(doc, "Banco", person.bank || "No registrado");
-            line(doc, "Cuenta", person.account || "No registrada");
-            line(doc, "Periodo", `${l.weekStart} al ${l.weekEnd}`);
-            line(doc, "Nómina", `#${l.payrollId}`);
-            const projects = l.projectAllocations === null ? null
-                : JSON.parse(l.projectAllocations) as {
-                    projectName: string;
-                    hours: number;
-                    amount: number;
-                }[];
-            doc.moveDown();
-            if (doc.y > 645)
-                doc.addPage();
-            doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Proyectos de esta nómina");
-            doc.moveDown(.35);
-            if (projects === null) {
-                doc.font("Helvetica").fontSize(9).fillColor("#66717A")
-                    .text("Esta nómina es anterior al registro del desglose por proyecto; no se reconstruye con datos modificables.");
-            }
-            else {
-                for (const project of projects) {
-                    if (doc.y > 690)
-                        doc.addPage();
-                    line(doc, project.projectName, `${l.kind === "empleado" ? `${Number(project.hours).toFixed(2)} h efectivas | ` : ""}Bruto USD ${Number(project.amount).toFixed(2)}`);
-                }
-                doc.font("Helvetica").fontSize(9).fillColor("#66717A")
-                    .text("Importes brutos por proyecto. Los descuentos se aplican solo a la persona.");
-            }
-            if (l.kind === "empleado") {
-                doc.moveDown();
-                if (doc.y > 645)
-                    doc.addPage();
-                doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Asistencia diaria del período");
-                doc.moveDown(.35);
-                const days = l.attendanceSnapshot === null ? null
-                    : JSON.parse(l.attendanceSnapshot) as ReceiptAttendanceDay[];
-                if (days === null) {
-                    doc.font("Helvetica").fontSize(9).fillColor("#66717A")
-                        .text("Esta nómina es anterior al registro del detalle diario en el recibo; no se reconstruye con registros posteriores.");
-                }
-                else if (!days.length) {
-                    doc.font("Helvetica").fontSize(9).fillColor("#66717A").text("No hay días de asistencia registrados en este período.");
-                }
-                else {
-                    for (const day of days) {
-                        if (doc.y > 635)
-                            doc.addPage();
-                        doc.font("Helvetica-Bold").fontSize(10).fillColor("#1d2b25")
-                            .text(`${day.date}  |  ${day.absent ? "AUSENCIA" : `${(day.hours + day.overtime).toFixed(2)} h efectivas`}`);
-                        doc.font("Helvetica").fontSize(9)
-                            .text(`Proyecto / ubicación: ${day.projectName || "No registrado"}  |  Responsable: ${day.responsible || "No registrado"}`);
-                        if (!day.absent) {
-                            doc.text(`Entrada: ${day.timeIn || "No registrada"}  |  Salida: ${day.timeOut || "No registrada"}  |  Descanso: ${day.breakMinutes} min`);
-                            doc.text(`Horas regulares: ${day.hours.toFixed(2)} h  |  Horas extra: ${day.overtime.toFixed(2)} h`);
-                            if (day.allocations.length > 1) {
-                                for (const part of day.allocations) {
-                                    if (doc.y > 695)
-                                        doc.addPage();
-                                    doc.text(`Obra: ${part.projectName}  |  ${(part.regularHours + part.overtimeHours).toFixed(2)} h efectivas`);
-                                }
-                            }
-                            if (day.dailyAmount !== null)
-                                doc.text(`Pago por día confirmado: USD ${day.dailyAmount.toFixed(2)}`);
-                            if (day.bonus)
-                                doc.text(`Bono registrado: USD ${day.bonus.toFixed(2)}`);
-                        }
-                        if (day.note)
-                            doc.text(`Nota: ${day.note}`);
-                        doc.moveDown(.65);
-                    }
-                }
-                if (days !== null) {
-                    const hours = weeklyEffectiveHours(days)!;
-                    if (doc.y > 645)
-                        doc.addPage();
-                    doc.font("Helvetica-Bold").fontSize(11).fillColor("#1d2b25")
-                        .text(`Total semanal de horas efectivas: ${hours.total.toFixed(2)} h`);
-                    doc.font("Helvetica").fontSize(9).text(`Regulares: ${hours.regular.toFixed(2)} h  |  Extra: ${hours.overtime.toFixed(2)} h`);
-                    doc.font("Helvetica").fontSize(9).fillColor("#66717A")
-                        .text("El total excluye descansos y ausencias. Solo aparecen los días registrados; las horas extra pueden no ser pagadas según la configuración de Gerencia.");
-                }
-            }
-            if (includedTasks.length) {
-                doc.moveDown();
-                if (doc.y > 645)
-                    doc.addPage();
-                doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Tareas aprobadas incluidas en esta nómina");
-                doc.moveDown(.35);
-                for (const task of includedTasks) {
-                    if (doc.y > 665)
-                        doc.addPage();
-                    doc.font("Helvetica-Bold").fontSize(10).fillColor("#1d2b25")
-                        .text(`${task.projectName} · Tarea #${task.id}`, { continued: true })
-                        .font("Helvetica").text(` · USD ${Number(task.amount).toFixed(2)}`);
-                    doc.font("Helvetica").fontSize(9).text(`${task.description} | ${task.date} | ${task.contractNumber ? `Contrato ${task.contractNumber}` : "Tarea independiente"}${task.date < l.weekStart ? " | Realizada antes de este periodo" : ""}`);
-                    doc.moveDown(.6);
-                }
-                doc.font("Helvetica").fontSize(9).fillColor("#66717A")
-                    .text("Las tareas ya están incluidas en el bruto por proyecto y en los conceptos; no se suman de nuevo.");
-            }
-            doc.moveDown();
-            if (doc.y > 535)
-                doc.addPage();
-            doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Conceptos");
-            doc.moveDown(.5);
-            for (const part of l.details.split("\n")) {
-                if (doc.y > 705)
-                    doc.addPage();
-                doc.font("Helvetica").fontSize(10).text(part);
-                doc.moveDown(.35);
-            }
-            doc.moveDown();
-            line(doc, "Bruto", `USD ${l.gross.toFixed(2)}`);
-            line(doc, "Descuentos", `USD ${l.deductions.toFixed(2)}`);
-            line(doc, "Neto", `USD ${l.net.toFixed(2)}`);
-            line(doc, "Estado", l.paid ? "PAGADO" : "APROBADO, PAGO PENDIENTE");
-            if (l.paid) {
-                line(doc, "Método", l.method);
-                line(doc, "Referencia", l.reference);
-                line(doc, "Registro", l.paidAt);
-            }
-            doc.moveDown(2);
-            if (doc.y > 670)
-                doc.addPage();
-            doc.fontSize(10).fillColor("#1d2b25").text("_______________________________          _______________________________");
-            doc.text("Administración / ONEFIX                              Recibido por");
-            doc.moveDown();
-            doc.fontSize(9).fillColor("#66717A").text("ONEFIX CONSTRUCTION · Documento operativo sin cálculo de conceptos legales.");
+        const receipt = createReceiptPdf({
+            personName: l.personName, document: person.document, kind: l.kind,
+            phone: person.phone, email: person.email, bank: person.bank, account: person.account,
+            weekStart: l.weekStart, weekEnd: l.weekEnd, payrollId: l.payrollId,
+            projects: l.projectAllocations === null ? null : JSON.parse(l.projectAllocations),
+            days: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot),
+            tasks: includedTasks, details: l.details, observation: l.observation,
+            gross: l.gross, deductions: l.deductions, net: l.net, paid: !!l.paid,
+            method: l.method, reference: l.reference, paidAt: l.paidAt,
         });
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
+        receipt.pipe(res);
+        receipt.end();
     });
     app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
         const d = (await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id)));

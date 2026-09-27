@@ -6,7 +6,7 @@ import express from "express";
 import { createServer } from "node:http";
 
 // server/routes.ts
-import PDFDocument from "pdfkit";
+import PDFDocument2 from "pdfkit";
 
 // shared/schema.ts
 import { z } from "zod";
@@ -87,8 +87,8 @@ var deductionInput = z.object({
 // shared/attendanceHours.ts
 var minutesOfDay = (time) => {
   if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error("Hora de entrada o salida inv\xE1lida");
-  const [hours, minutes] = time.split(":").map(Number);
-  return hours * 60 + minutes;
+  const [hours2, minutes] = time.split(":").map(Number);
+  return hours2 * 60 + minutes;
 };
 function calculateAttendanceHours(timeIn, timeOut, breakMinutes, overtime) {
   const start = minutesOfDay(timeIn);
@@ -137,7 +137,7 @@ function initialLoadOnly(at = /* @__PURE__ */ new Date()) {
 // server/pg-storage.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, types } from "pg";
-types.setTypeParser(20, (value) => Number(value));
+types.setTypeParser(20, (value2) => Number(value2));
 var connectionString = process.env.ONEFIX_DATABASE_URL || process.env.DATABASE_URL;
 if (!connectionString || !/^postgres(?:ql)?:\/\//.test(connectionString)) {
   throw new Error("Falta ONEFIX_DATABASE_URL: ONEFIX requiere PostgreSQL persistente para operar.");
@@ -401,7 +401,7 @@ function finalizeProjects(buckets, gross) {
   buckets[0].amount += difference;
   if (buckets.some((b) => b.amount < 0))
     throw new Error("El desglose por proyecto no cuadra con el bruto");
-  return buckets.map(({ projectId, projectName, hours, amount }) => ({ projectId, projectName, hours: Math.round(hours * 100) / 100, amount: amount / 100 }));
+  return buckets.map(({ projectId, projectName, hours: hours2, amount }) => ({ projectId, projectName, hours: Math.round(hours2 * 100) / 100, amount: amount / 100 }));
 }
 var dateValid = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && !Number.isNaN(Date.parse(`${s}T12:00:00Z`));
 var payrollFull = async (p) => ({
@@ -462,7 +462,7 @@ async function generatePayroll(weekStart) {
           allocations: d.allocations ? JSON.parse(d.allocations) : d.absent ? [] : [{ projectName: d.projectName, regularHours: d.hours, overtimeHours: d.overtime }]
         }));
         const absences = days.filter((d) => d.absent).length;
-        const hours = days.reduce((s, d) => s + (d.absent ? 0 : d.hours), 0);
+        const hours2 = days.reduce((s, d) => s + (d.absent ? 0 : d.hours), 0);
         const overtime = days.reduce((s, d) => s + (d.absent ? 0 : d.overtime), 0);
         const bonus = money(days.reduce((s, d) => s + d.bonus, 0));
         const adjustment = person.payType === "fijo" && absences ? await row("SELECT amount FROM payroll_absence_adjustments WHERE personId=? AND weekStart=?", person.id, weekStart) : null;
@@ -848,6 +848,178 @@ function registerContractTracking(app) {
   });
 }
 
+// server/receipt-pdf.ts
+import PDFDocument from "pdfkit";
+var BLACK = "#151515";
+var ORANGE = "#E87512";
+var GRAY = "#575757";
+var PALE = "#FFF2E6";
+var LEFT = 38;
+var RIGHT = 574;
+var WIDTH = RIGHT - LEFT;
+var usd = (amount) => `USD ${Number(amount).toFixed(2)}`;
+var hours = (amount) => `${Number(amount).toFixed(2)} h`;
+var value = (text, empty = "No registrado") => String(text ?? "").trim() || empty;
+function layout(doc, receipt) {
+  let y = 0;
+  function text(content, x, width, size = 8.5, bold = false, color = BLACK) {
+    doc.font(bold ? "Helvetica-Bold" : "Helvetica").fontSize(size).fillColor(color);
+    const height = doc.heightOfString(content, { width, lineGap: 1.4 });
+    doc.text(content, x, y, { width, lineGap: 1.4 });
+    return height;
+  }
+  function rule(color = "#D9D9D9") {
+    doc.moveTo(LEFT, y).lineTo(RIGHT, y).lineWidth(0.7).strokeColor(color).stroke();
+  }
+  function heading(title) {
+    y += 15;
+    doc.rect(LEFT, y + 1, 3, 11).fill(ORANGE);
+    text(title.toUpperCase(), LEFT + 10, WIDTH - 10, 9, true);
+    y += 18;
+  }
+  function paragraph(content, color = BLACK, size = 8.5) {
+    const h = text(content, LEFT, WIDTH, size, false, color);
+    y += h + 4;
+  }
+  function pair(label, content, x, width) {
+    const labelH = text(label.toUpperCase(), x, width, 7, true, GRAY);
+    y += labelH + 2;
+    const bodyH = text(content, x, width, 9);
+    y -= labelH + 2;
+    return labelH + 2 + bodyH;
+  }
+  doc.rect(0, 0, 612, 79).fill(BLACK);
+  doc.rect(0, 0, 8, 79).fill(ORANGE);
+  y = 17;
+  text("ONEFIX", LEFT, 230, 23, true, "#FFFFFF");
+  y = 46;
+  text("CONSTRUCTION", LEFT, 230, 8.5, true, ORANGE);
+  y = 23;
+  text("COMPROBANTE INDIVIDUAL", 300, 274, 12, true, "#FFFFFF");
+  y = 45;
+  text(`N\xD3MINA #${receipt.payrollId}  |  ${receipt.paid ? "PAGADO" : "PAGO PENDIENTE"}`, 300, 274, 8.5, true, ORANGE);
+  y = 95;
+  for (const [leftLabel, leftValue, rightLabel, rightValue] of [
+    ["Persona", receipt.personName, "Per\xEDodo", `${receipt.weekStart} al ${receipt.weekEnd}`],
+    ["Documento", value(receipt.document), "Tipo", value(receipt.kind)],
+    ["Tel\xE9fono", value(receipt.phone), "Correo", value(receipt.email)],
+    ["Banco", value(receipt.bank), "Cuenta", value(receipt.account, "No registrada")]
+  ]) {
+    const a = pair(leftLabel, leftValue, LEFT, 245);
+    const b = pair(rightLabel, rightValue, 307, 267);
+    y += Math.max(a, b) + 8;
+  }
+  rule();
+  heading("Proyectos de esta n\xF3mina");
+  if (receipt.projects === null) {
+    paragraph("Desglose por proyecto no disponible en esta n\xF3mina hist\xF3rica.", GRAY);
+  } else if (!receipt.projects.length) {
+    paragraph("Sin importes asignados por proyecto.", GRAY);
+  } else {
+    for (const project of receipt.projects) {
+      const start = y;
+      const nameH = text(value(project.projectName), LEFT, 330, 8.5, true);
+      y = start;
+      const figure = `${receipt.kind === "empleado" ? `${hours(project.hours)}  |  ` : ""}${usd(project.amount)} bruto`;
+      const amountH = text(figure, 371, 203, 8.5);
+      y += Math.max(nameH, amountH) + 4;
+    }
+    paragraph("Los importes son brutos por proyecto; los descuentos corresponden a la persona.", GRAY, 7.7);
+  }
+  if (receipt.kind === "empleado") {
+    heading("Asistencia diaria");
+    if (receipt.days === null) {
+      paragraph("Detalle diario no disponible en esta n\xF3mina hist\xF3rica.", GRAY);
+    } else if (!receipt.days.length) {
+      paragraph("No hay d\xEDas de asistencia registrados en este per\xEDodo.", GRAY);
+    } else {
+      for (const day of receipt.days) {
+        const title = `${day.date}  |  ${day.absent ? "AUSENCIA" : `${hours(day.hours + day.overtime)} efectivas`}`;
+        y += text(title, LEFT, WIDTH, 8.5, true) + 2;
+        paragraph(`Proyecto / ubicaci\xF3n: ${value(day.projectName)}  |  Responsable: ${value(day.responsible)}`);
+        if (!day.absent) {
+          paragraph(`Entrada ${value(day.timeIn)}  |  Salida ${value(day.timeOut)}  |  Descanso ${day.breakMinutes} min  |  Regulares ${hours(day.hours)}  |  Extra ${hours(day.overtime)}`);
+          if (day.allocations?.length > 1) {
+            for (const part of day.allocations) {
+              paragraph(`Obra: ${part.projectName} (${hours(part.regularHours + part.overtimeHours)} efectivas)`, GRAY, 8);
+            }
+          }
+          if (day.dailyAmount !== null) paragraph(`Pago diario confirmado: ${usd(day.dailyAmount)}`);
+          if (day.bonus) paragraph(`Bono registrado: ${usd(day.bonus)}`);
+        }
+        if (day.note) paragraph(`Nota: ${day.note}`, GRAY);
+        y += 3;
+      }
+    }
+    if (receipt.days !== null) {
+      const total = weeklyEffectiveHours(receipt.days);
+      doc.rect(LEFT, y, WIDTH, 27).fill(PALE);
+      y += 6;
+      text(`TOTAL SEMANAL: ${hours(total.total)} EFECTIVAS`, LEFT + 9, 278, 9, true);
+      text(`Regulares ${hours(total.regular)}  |  Extra ${hours(total.overtime)}`, 320, 245, 8);
+      y += 25;
+      paragraph("Horas efectivas sin descansos ni ausencias; las horas extra pueden no ser pagadas.", GRAY, 7.7);
+    }
+  }
+  if (receipt.tasks.length) {
+    heading("Tareas aprobadas incluidas");
+    for (const task of receipt.tasks) {
+      const firstY = y;
+      const titleH = text(`${task.projectName}  |  Tarea #${task.id}`, LEFT, 405, 8.5, true);
+      y = firstY;
+      const amountH = text(usd(task.amount), 475, 99, 8.5, true);
+      y += Math.max(titleH, amountH) + 2;
+      paragraph(`${task.description}  |  ${task.date}  |  ${task.contractNumber ? `Contrato ${task.contractNumber}` : "Independiente"}${task.date < receipt.weekStart ? "  |  Fecha anterior al per\xEDodo" : ""}`, GRAY, 8);
+    }
+    paragraph("Las tareas ya forman parte del bruto y no se suman de nuevo.", GRAY, 7.7);
+  }
+  heading("Conceptos y liquidaci\xF3n");
+  for (const part of receipt.details.split("\n").filter(Boolean)) paragraph(part);
+  if (receipt.observation?.trim()) paragraph(`Observaci\xF3n: ${receipt.observation.trim()}`, GRAY);
+  y += 3;
+  rule(ORANGE);
+  y += 8;
+  for (const [label, amount] of [["BRUTO", receipt.gross], ["DESCUENTOS", receipt.deductions]]) {
+    const rowY = y;
+    text(label, LEFT, 280, 8, true);
+    y = rowY;
+    text(usd(amount), 430, 144, 9, true);
+    y += 15;
+  }
+  doc.rect(LEFT, y, WIDTH, 34).fill(BLACK);
+  y += 9;
+  text("NETO A PAGAR", LEFT + 10, 300, 10, true, "#FFFFFF");
+  text(usd(receipt.net), 428, 136, 11, true, ORANGE);
+  y += 31;
+  heading("Estado del pago");
+  paragraph(receipt.paid ? `PAGADO  |  M\xE9todo: ${value(receipt.method)}  |  Referencia: ${value(receipt.reference)}  |  Registro: ${value(receipt.paidAt)}` : "APROBADO. PAGO PENDIENTE.");
+  y += 24;
+  rule(BLACK);
+  y += 7;
+  text("Administraci\xF3n / ONEFIX", LEFT, 246, 8, true);
+  text("Recibido por", 307, 267, 8, true);
+  y += 22;
+  rule(ORANGE);
+  y += 8;
+  paragraph("ONEFIX CONSTRUCTION  |  Documento operativo sin c\xE1lculo de conceptos legales.", GRAY, 7.5);
+  return y;
+}
+function createReceiptPdf(receipt) {
+  const measure = new PDFDocument({ size: [612, 14e3], margin: 0 });
+  const contentHeight = layout(measure, receipt);
+  measure.on("error", () => {
+  });
+  measure.end();
+  measure.resume();
+  if (contentHeight > 13900) throw new Error("El recibo supera la longitud m\xE1xima admitida");
+  const pageHeight = Math.max(792, Math.ceil(contentHeight + 28));
+  const doc = new PDFDocument({ size: [612, pageHeight], margin: 0 });
+  doc.info.Title = `Comprobante individual de n\xF3mina ONEFIX #${receipt.payrollId}`;
+  doc.info.Author = "Perplexity Computer";
+  layout(doc, receipt);
+  return doc;
+}
+
 // server/routes.ts
 function issue2(res, e) {
   let message = e && typeof e === "object" && "issues" in e && Array.isArray(e.issues) ? e.issues[0]?.message || "Revisa los datos del formulario" : e instanceof Error ? e.message : "No se pudo completar la operaci\xF3n";
@@ -865,7 +1037,7 @@ function issue2(res, e) {
   res.status(["23505", "23503", "23514"].includes(code) || /UNIQUE|FOREIGN KEY|CHECK/.test(message) ? 409 : 400).json({ error: message });
 }
 async function pdf(res, name, draw) {
-  const doc = new PDFDocument({ margin: 50, size: "LETTER", bufferPages: true });
+  const doc = new PDFDocument2({ margin: 50, size: "LETTER", bufferPages: true });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
   doc.pipe(res);
@@ -880,10 +1052,10 @@ async function pdf(res, name, draw) {
     throw error;
   }
 }
-function line(doc, label, value) {
+function line(doc, label, value2) {
   if (doc.y > 705)
     doc.addPage();
-  doc.font("Helvetica-Bold").fontSize(10).text(label, { continued: true }).font("Helvetica").text(`  ${value}`);
+  doc.font("Helvetica-Bold").fontSize(10).text(label, { continued: true }).font("Helvetica").text(`  ${value2}`);
   doc.moveDown(0.48);
 }
 async function registerRoutes(httpServer, app) {
@@ -1119,11 +1291,11 @@ async function registerRoutes(httpServer, app) {
         if (decision === "accept") {
           if (await row("SELECT id FROM payrolls WHERE weekStart<=? AND weekEnd>=?", a.date, a.date))
             return "locked";
-          const hours = a.timeIn ? calculateAttendanceHours(a.timeIn, a.timeOut, a.breakMinutes, a.overtime).regular : a.hours;
-          const allocations = a.absent ? [] : a.allocations || [{ projectName: a.projectName, regularHours: hours, overtimeHours: a.overtime }];
-          if (a.absent && (hours || a.overtime || a.bonus || a.allocations?.length) || !a.absent && (!allocations.length || allocations[0].projectName.toLocaleLowerCase() !== a.projectName.toLocaleLowerCase() || new Set(allocations.map((p) => p.projectName.toLocaleLowerCase())).size !== allocations.length || allocations.some((p) => p.regularHours + p.overtimeHours <= 0) || Math.abs(allocations.reduce((sum, p) => sum + p.regularHours, 0) - hours) > 1e-4 || Math.abs(allocations.reduce((sum, p) => sum + p.overtimeHours, 0) - a.overtime) > 1e-4))
+          const hours2 = a.timeIn ? calculateAttendanceHours(a.timeIn, a.timeOut, a.breakMinutes, a.overtime).regular : a.hours;
+          const allocations = a.absent ? [] : a.allocations || [{ projectName: a.projectName, regularHours: hours2, overtimeHours: a.overtime }];
+          if (a.absent && (hours2 || a.overtime || a.bonus || a.allocations?.length) || !a.absent && (!allocations.length || allocations[0].projectName.toLocaleLowerCase() !== a.projectName.toLocaleLowerCase() || new Set(allocations.map((p) => p.projectName.toLocaleLowerCase())).size !== allocations.length || allocations.some((p) => p.regularHours + p.overtimeHours <= 0) || Math.abs(allocations.reduce((sum, p) => sum + p.regularHours, 0) - hours2) > 1e-4 || Math.abs(allocations.reduce((sum, p) => sum + p.overtimeHours, 0) - a.overtime) > 1e-4))
             throw new Error("La propuesta no cumple las reglas de asistencia y proyectos");
-          const values = [a.projectName, a.responsible, a.timeIn, a.timeOut, a.breakMinutes, hours, a.overtime, a.absent ? 1 : 0, money(a.bonus), a.note, JSON.stringify(allocations)];
+          const values = [a.projectName, a.responsible, a.timeIn, a.timeOut, a.breakMinutes, hours2, a.overtime, a.absent ? 1 : 0, money(a.bonus), a.note, JSON.stringify(allocations)];
           if (current)
             await run(`UPDATE attendance SET projectName=?,responsible=?,timeIn=?,timeOut=?,breakMinutes=?,hours=?,overtime=?,absent=?,bonus=?,note=?,allocations=?,revision=revision+1 WHERE id=?`, ...values, current.id);
           else
@@ -1155,13 +1327,13 @@ async function registerRoutes(httpServer, app) {
         throw new Error("Fecha inv\xE1lida");
       if ((await row("SELECT kind FROM people WHERE id=?", a.personId))?.kind !== "empleado")
         throw new Error("Selecciona un empleado");
-      const hours = a.timeIn ? calculateAttendanceHours(a.timeIn, a.timeOut, a.breakMinutes, a.overtime).regular : a.hours;
-      if (a.absent && (hours || a.overtime || a.bonus))
+      const hours2 = a.timeIn ? calculateAttendanceHours(a.timeIn, a.timeOut, a.breakMinutes, a.overtime).regular : a.hours;
+      if (a.absent && (hours2 || a.overtime || a.bonus))
         throw new Error("Una ausencia no puede tener horas ni bono");
-      const allocations = a.absent ? [] : a.allocations || [{ projectName: a.projectName, regularHours: hours, overtimeHours: a.overtime }];
+      const allocations = a.absent ? [] : a.allocations || [{ projectName: a.projectName, regularHours: hours2, overtimeHours: a.overtime }];
       if (a.absent && a.allocations?.length)
         throw new Error("Una ausencia no puede repartir horas entre proyectos");
-      if (!a.absent && (!allocations.length || allocations[0].projectName.toLocaleLowerCase() !== a.projectName.toLocaleLowerCase() || new Set(allocations.map((p) => p.projectName.toLocaleLowerCase())).size !== allocations.length || allocations.some((p) => p.regularHours + p.overtimeHours <= 0) || Math.abs(allocations.reduce((sum, p) => sum + p.regularHours, 0) - hours) > 1e-4 || Math.abs(allocations.reduce((sum, p) => sum + p.overtimeHours, 0) - a.overtime) > 1e-4))
+      if (!a.absent && (!allocations.length || allocations[0].projectName.toLocaleLowerCase() !== a.projectName.toLocaleLowerCase() || new Set(allocations.map((p) => p.projectName.toLocaleLowerCase())).size !== allocations.length || allocations.some((p) => p.regularHours + p.overtimeHours <= 0) || Math.abs(allocations.reduce((sum, p) => sum + p.regularHours, 0) - hours2) > 1e-4 || Math.abs(allocations.reduce((sum, p) => sum + p.overtimeHours, 0) - a.overtime) > 1e-4))
         throw new Error("El reparto por proyecto debe coincidir con las horas regulares y extra, sin obras duplicadas");
       const locked = await row("SELECT id FROM payrolls WHERE weekStart<=? AND weekEnd>=?", a.date, a.date);
       if (locked)
@@ -1170,7 +1342,7 @@ async function registerRoutes(httpServer, app) {
         const existing = await row("SELECT id,revision FROM attendance WHERE personId=? AND date=?", a.personId, a.date);
         if ((existing?.revision ?? 0) !== expectedRevision)
           return false;
-        const values = [a.projectName, a.responsible, a.timeIn, a.timeOut, a.breakMinutes, hours, a.overtime, a.absent ? 1 : 0, money(a.bonus), a.note, JSON.stringify(allocations)];
+        const values = [a.projectName, a.responsible, a.timeIn, a.timeOut, a.breakMinutes, hours2, a.overtime, a.absent ? 1 : 0, money(a.bonus), a.note, JSON.stringify(allocations)];
         if (existing) {
           const changed = await run(`UPDATE attendance SET projectName=?,responsible=?,timeIn=?,timeOut=?,breakMinutes=?,hours=?,overtime=?,absent=?,bonus=?,note=?,allocations=?,revision=revision+1 WHERE id=? AND revision=?`, ...values, existing.id, expectedRevision);
           if (!changed.changes)
@@ -1520,8 +1692,8 @@ async function registerRoutes(httpServer, app) {
             doc.font("Helvetica").fontSize(9).fillColor("#1d2b25").text(`\u2022 ${concept}`, { indent: 12 });
           }
           doc.moveDown(0.35);
-          const hours = l.kind === "empleado" && l.attendanceSnapshot !== null ? weeklyEffectiveHours(JSON.parse(l.attendanceSnapshot)) : null;
-          line(doc, "Horas efectivas de la semana", l.kind !== "empleado" ? "No aplica (tareas aprobadas)" : hours === null ? "Sin dato hist\xF3rico guardado" : `${hours.total.toFixed(2)} h (regulares ${hours.regular.toFixed(2)} h; extra ${hours.overtime.toFixed(2)} h)`);
+          const hours2 = l.kind === "empleado" && l.attendanceSnapshot !== null ? weeklyEffectiveHours(JSON.parse(l.attendanceSnapshot)) : null;
+          line(doc, "Horas efectivas de la semana", l.kind !== "empleado" ? "No aplica (tareas aprobadas)" : hours2 === null ? "Sin dato hist\xF3rico guardado" : `${hours2.total.toFixed(2)} h (regulares ${hours2.regular.toFixed(2)} h; extra ${hours2.overtime.toFixed(2)} h)`);
           if (l.observation)
             line(doc, "Observaci\xF3n", l.observation);
           line(doc, "Importes", `Bruto USD ${l.gross.toFixed(2)} | Descuentos USD ${l.deductions.toFixed(2)} | Neto USD ${l.net.toFixed(2)}`);
@@ -1552,124 +1724,34 @@ async function registerRoutes(httpServer, app) {
       return res.status(404).json({ error: "Recibo disponible tras la aprobaci\xF3n" });
     const person = await row("SELECT * FROM people WHERE id=?", l.personId);
     const includedTasks = await rows("SELECT t.*,pr.name AS projectName,c.number AS contractNumber FROM tasks t JOIN projects pr ON pr.id=t.projectId LEFT JOIN contracts c ON c.id=t.contractId WHERE t.payrollId=? AND t.personId=? ORDER BY t.date,t.id", l.payrollId, l.personId);
-    await pdf(res, `ONEFIX-recibo-${l.payrollId}-${l.id}.pdf`, (doc) => {
-      doc.font("Helvetica-Bold").fontSize(16).text("Comprobante individual de pago");
-      doc.moveDown();
-      line(doc, "Persona", l.personName);
-      line(doc, "Documento", person.document);
-      line(doc, "Tipo", l.kind);
-      line(doc, "Tel\xE9fono", person.phone);
-      line(doc, "Correo", person.email || "No registrado");
-      line(doc, "Banco", person.bank || "No registrado");
-      line(doc, "Cuenta", person.account || "No registrada");
-      line(doc, "Periodo", `${l.weekStart} al ${l.weekEnd}`);
-      line(doc, "N\xF3mina", `#${l.payrollId}`);
-      const projects = l.projectAllocations === null ? null : JSON.parse(l.projectAllocations);
-      doc.moveDown();
-      if (doc.y > 645)
-        doc.addPage();
-      doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Proyectos de esta n\xF3mina");
-      doc.moveDown(0.35);
-      if (projects === null) {
-        doc.font("Helvetica").fontSize(9).fillColor("#66717A").text("Esta n\xF3mina es anterior al registro del desglose por proyecto; no se reconstruye con datos modificables.");
-      } else {
-        for (const project of projects) {
-          if (doc.y > 690)
-            doc.addPage();
-          line(doc, project.projectName, `${l.kind === "empleado" ? `${Number(project.hours).toFixed(2)} h efectivas | ` : ""}Bruto USD ${Number(project.amount).toFixed(2)}`);
-        }
-        doc.font("Helvetica").fontSize(9).fillColor("#66717A").text("Importes brutos por proyecto. Los descuentos se aplican solo a la persona.");
-      }
-      if (l.kind === "empleado") {
-        doc.moveDown();
-        if (doc.y > 645)
-          doc.addPage();
-        doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Asistencia diaria del per\xEDodo");
-        doc.moveDown(0.35);
-        const days = l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot);
-        if (days === null) {
-          doc.font("Helvetica").fontSize(9).fillColor("#66717A").text("Esta n\xF3mina es anterior al registro del detalle diario en el recibo; no se reconstruye con registros posteriores.");
-        } else if (!days.length) {
-          doc.font("Helvetica").fontSize(9).fillColor("#66717A").text("No hay d\xEDas de asistencia registrados en este per\xEDodo.");
-        } else {
-          for (const day of days) {
-            if (doc.y > 635)
-              doc.addPage();
-            doc.font("Helvetica-Bold").fontSize(10).fillColor("#1d2b25").text(`${day.date}  |  ${day.absent ? "AUSENCIA" : `${(day.hours + day.overtime).toFixed(2)} h efectivas`}`);
-            doc.font("Helvetica").fontSize(9).text(`Proyecto / ubicaci\xF3n: ${day.projectName || "No registrado"}  |  Responsable: ${day.responsible || "No registrado"}`);
-            if (!day.absent) {
-              doc.text(`Entrada: ${day.timeIn || "No registrada"}  |  Salida: ${day.timeOut || "No registrada"}  |  Descanso: ${day.breakMinutes} min`);
-              doc.text(`Horas regulares: ${day.hours.toFixed(2)} h  |  Horas extra: ${day.overtime.toFixed(2)} h`);
-              if (day.allocations.length > 1) {
-                for (const part of day.allocations) {
-                  if (doc.y > 695)
-                    doc.addPage();
-                  doc.text(`Obra: ${part.projectName}  |  ${(part.regularHours + part.overtimeHours).toFixed(2)} h efectivas`);
-                }
-              }
-              if (day.dailyAmount !== null)
-                doc.text(`Pago por d\xEDa confirmado: USD ${day.dailyAmount.toFixed(2)}`);
-              if (day.bonus)
-                doc.text(`Bono registrado: USD ${day.bonus.toFixed(2)}`);
-            }
-            if (day.note)
-              doc.text(`Nota: ${day.note}`);
-            doc.moveDown(0.65);
-          }
-        }
-        if (days !== null) {
-          const hours = weeklyEffectiveHours(days);
-          if (doc.y > 645)
-            doc.addPage();
-          doc.font("Helvetica-Bold").fontSize(11).fillColor("#1d2b25").text(`Total semanal de horas efectivas: ${hours.total.toFixed(2)} h`);
-          doc.font("Helvetica").fontSize(9).text(`Regulares: ${hours.regular.toFixed(2)} h  |  Extra: ${hours.overtime.toFixed(2)} h`);
-          doc.font("Helvetica").fontSize(9).fillColor("#66717A").text("El total excluye descansos y ausencias. Solo aparecen los d\xEDas registrados; las horas extra pueden no ser pagadas seg\xFAn la configuraci\xF3n de Gerencia.");
-        }
-      }
-      if (includedTasks.length) {
-        doc.moveDown();
-        if (doc.y > 645)
-          doc.addPage();
-        doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Tareas aprobadas incluidas en esta n\xF3mina");
-        doc.moveDown(0.35);
-        for (const task of includedTasks) {
-          if (doc.y > 665)
-            doc.addPage();
-          doc.font("Helvetica-Bold").fontSize(10).fillColor("#1d2b25").text(`${task.projectName} \xB7 Tarea #${task.id}`, { continued: true }).font("Helvetica").text(` \xB7 USD ${Number(task.amount).toFixed(2)}`);
-          doc.font("Helvetica").fontSize(9).text(`${task.description} | ${task.date} | ${task.contractNumber ? `Contrato ${task.contractNumber}` : "Tarea independiente"}${task.date < l.weekStart ? " | Realizada antes de este periodo" : ""}`);
-          doc.moveDown(0.6);
-        }
-        doc.font("Helvetica").fontSize(9).fillColor("#66717A").text("Las tareas ya est\xE1n incluidas en el bruto por proyecto y en los conceptos; no se suman de nuevo.");
-      }
-      doc.moveDown();
-      if (doc.y > 535)
-        doc.addPage();
-      doc.font("Helvetica-Bold").fontSize(12).fillColor("#1d2b25").text("Conceptos");
-      doc.moveDown(0.5);
-      for (const part of l.details.split("\n")) {
-        if (doc.y > 705)
-          doc.addPage();
-        doc.font("Helvetica").fontSize(10).text(part);
-        doc.moveDown(0.35);
-      }
-      doc.moveDown();
-      line(doc, "Bruto", `USD ${l.gross.toFixed(2)}`);
-      line(doc, "Descuentos", `USD ${l.deductions.toFixed(2)}`);
-      line(doc, "Neto", `USD ${l.net.toFixed(2)}`);
-      line(doc, "Estado", l.paid ? "PAGADO" : "APROBADO, PAGO PENDIENTE");
-      if (l.paid) {
-        line(doc, "M\xE9todo", l.method);
-        line(doc, "Referencia", l.reference);
-        line(doc, "Registro", l.paidAt);
-      }
-      doc.moveDown(2);
-      if (doc.y > 670)
-        doc.addPage();
-      doc.fontSize(10).fillColor("#1d2b25").text("_______________________________          _______________________________");
-      doc.text("Administraci\xF3n / ONEFIX                              Recibido por");
-      doc.moveDown();
-      doc.fontSize(9).fillColor("#66717A").text("ONEFIX CONSTRUCTION \xB7 Documento operativo sin c\xE1lculo de conceptos legales.");
+    const receipt = createReceiptPdf({
+      personName: l.personName,
+      document: person.document,
+      kind: l.kind,
+      phone: person.phone,
+      email: person.email,
+      bank: person.bank,
+      account: person.account,
+      weekStart: l.weekStart,
+      weekEnd: l.weekEnd,
+      payrollId: l.payrollId,
+      projects: l.projectAllocations === null ? null : JSON.parse(l.projectAllocations),
+      days: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot),
+      tasks: includedTasks,
+      details: l.details,
+      observation: l.observation,
+      gross: l.gross,
+      deductions: l.deductions,
+      net: l.net,
+      paid: !!l.paid,
+      method: l.method,
+      reference: l.reference,
+      paidAt: l.paidAt
     });
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
+    receipt.pipe(res);
+    receipt.end();
   });
   app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
     const d = await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id));
