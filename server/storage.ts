@@ -75,12 +75,11 @@ export const payrollFull = async (p: any) => ({
         projectAllocations: l.projectAllocations === null ? null : JSON.parse(l.projectAllocations),
         attendanceSnapshot: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot) })),
 });
-export async function generatePayroll(weekStart: string) {
+async function preparePayroll(weekStart: string) {
     const { weekEnd: end, availableOn } = payrollPeriod(weekStart);
     const todayInFlorida = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
     if (todayInFlorida < availableOn)
         throw new Error(`La nómina del ${weekStart} al ${end} se genera desde el domingo ${availableOn}`);
-    return (await db.transaction(async () => {
         if ((await row("SELECT id FROM payrolls WHERE weekStart=?", weekStart)))
             throw new Error("Esta semana ya tiene una nómina");
         const overlap = (await row("SELECT id,weekStart,weekEnd FROM payrolls WHERE weekStart<=? AND weekEnd>=? LIMIT 1", end, weekStart));
@@ -99,6 +98,7 @@ export async function generatePayroll(weekStart: string) {
         const projects = (await rows("SELECT id,name FROM projects"));
         const prepared: any[] = [];
         const taskIds: number[] = [];
+        const warnings: string[] = [];
         for (const person of people) {
             let gross = 0;
             let absenceAmount = 0;
@@ -107,6 +107,8 @@ export async function generatePayroll(weekStart: string) {
             const parts: string[] = [];
             if (person.kind === "empleado") {
                 const days = (await rows("SELECT a.*,d.approvedAmount AS dailyAmount FROM attendance a LEFT JOIN daily_pays d ON d.attendanceId=a.id AND d.status='approved' WHERE a.personId=? AND a.date BETWEEN ? AND ? ORDER BY a.date,a.id", person.id, weekStart, end));
+                if (person.payType === "fijo" && !days.length)
+                    warnings.push(`${person.name}: sueldo fijo completo sin asistencia registrada esta semana. Administración debe comprobarlo.`);
                 attendanceSnapshot = days.map(d => ({
                     date: d.date, projectName: d.projectName, responsible: d.responsible,
                     timeIn: d.timeIn, timeOut: d.timeOut, breakMinutes: d.breakMinutes,
@@ -144,6 +146,8 @@ export async function generatePayroll(weekStart: string) {
                 const bonusShares = splitCents(cents(bonus), buckets.map(b => b.bonus));
                 buckets.forEach((b, i) => { b.amount += baseShares[i] + dailyShares[i] + extraShares[i] + bonusShares[i]; });
                 projectAllocations = finalizeProjects(buckets, gross);
+                if (gross > 0 && projectAllocations.some(a => a.projectName === "Sin proyecto asignado" && a.amount > 0))
+                    warnings.push(`${person.name}: parte del bruto no tiene proyecto asignado.`);
                 if (person.payType === "fijo")
                     parts.push(`Sueldo semanal: $${base.toFixed(2)}`);
                 else if (standardHours || !dailyTotal)
@@ -194,6 +198,38 @@ export async function generatePayroll(weekStart: string) {
         }
         if (!prepared.length)
             throw new Error("No hay conceptos para esta semana. Registra asistencia o tareas aprobadas");
+        return { end, availableOn, prepared, taskIds, warnings };
+}
+export async function previewPayroll(weekStart: string) {
+    const { weekEnd, availableOn } = payrollPeriod(weekStart);
+    try {
+        const { prepared, warnings } = await preparePayroll(weekStart);
+        return {
+            weekStart, weekEnd, availableOn, ready: true, blockers: [] as string[], warnings,
+            lines: prepared.map(p => ({
+                personId: p.person.id, personName: p.person.name, kind: p.person.kind,
+                gross: p.gross, deductions: p.deductions, net: p.net,
+                hours: p.attendanceSnapshot?.reduce((sum: number, d: ReceiptAttendanceDay) => sum + (d.absent ? 0 : d.hours + d.overtime), 0) ?? null,
+                projectCount: p.projectAllocations.filter((a: ProjectAllocation) => a.amount > 0).length,
+            })),
+            totals: {
+                gross: money(prepared.reduce((sum, p) => sum + p.gross, 0)),
+                deductions: money(prepared.reduce((sum, p) => sum + p.deductions, 0)),
+                net: money(prepared.reduce((sum, p) => sum + p.net, 0)),
+            },
+        };
+    } catch (error) {
+        // Only business-rule failures are presented as blockers; DB/network errors
+        // must remain failures so the client cannot mistake them for a valid preview.
+        if (!(error instanceof Error) || !/^(La nómina del|Esta semana|Este período|Administración debe|El jornal de|Falta tarifa|Descuentos de|No hay conceptos)/.test(error.message))
+            throw error;
+        return { weekStart, weekEnd, availableOn, ready: false, blockers: [error.message], warnings: [],
+            lines: [], totals: { gross: 0, deductions: 0, net: 0 } };
+    }
+}
+export async function generatePayroll(weekStart: string) {
+    return (await db.transaction(async () => {
+        const { end, prepared, taskIds } = await preparePayroll(weekStart);
         const created = (await run("INSERT INTO payrolls (weekStart,weekEnd,status,submittedAt,note) VALUES (?,?,?,?,?)", weekStart, end, "borrador", new Date().toISOString(), ""));
         const id = Number(created.lastInsertRowid);
         for (const p of prepared) {

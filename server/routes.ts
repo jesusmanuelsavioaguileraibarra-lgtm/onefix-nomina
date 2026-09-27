@@ -8,7 +8,7 @@ import { calculateAttendanceHours } from "@shared/attendanceHours";
 import { weeklyEffectiveHours } from "@shared/weeklyHours";
 import { payrollPeriod } from "@shared/payrollPeriod";
 import { initialLoadOnly } from "@shared/activation";
-import { all, dateValid, db, generatePayroll, money, payrollFull, row, rows, run } from "./storage";
+import { all, dateValid, db, generatePayroll, previewPayroll, money, payrollFull, row, rows, run } from "./storage";
 import { registerAuth, requireAuth, downloadAuth, allow, audit } from "./auth";
 import { registerContractTracking } from "./contract-tracking";
 import { registerReceivables } from "./receivables";
@@ -469,6 +469,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         catch (e) {
             issue(res, e);
         }
+    });
+    app.get("/api/payrolls/preview", allow("administracion", "gerencia"), async (req, res) => {
+        try { res.json(await previewPayroll(String(req.query.weekStart || ""))); }
+        catch (e) { issue(res, e); }
     });
     app.post("/api/payrolls", allow("administracion", "gerencia"), async (req, res) => { try {
         const p = (await generatePayroll(String(req.body.weekStart)));

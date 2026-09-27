@@ -115,6 +115,8 @@ async function sendWhatsapp(destination: string, pdf: Buffer, lineId: number, on
 // One attempt per payment. Ambiguous network failures remain under manual
 // verification instead of re-sending a private receipt automatically.
 export async function dispatchReceipt(lineId: number): Promise<void> {
+  // Explicit opt-in: paid receipts remain queued while communications are paused.
+  if (process.env.ONEFIX_RECEIPT_SEND_ENABLED !== "1") return;
   const claimed = await db.transaction(async () => {
     const d = await row(`SELECT * FROM receipt_deliveries WHERE "lineId"=? FOR UPDATE`, lineId);
     if (!d || !["pending", "failed", "configuration"].includes(d.status)) return null;
@@ -199,6 +201,8 @@ export function registerReceiptDelivery(app: Express) {
     res.json(items);
   });
   app.post("/api/receipt-deliveries/:lineId/retry", allow("administracion"), async (req, res) => {
+    if (process.env.ONEFIX_RECEIPT_SEND_ENABLED !== "1")
+      return res.status(423).json({ error: "Los envíos de recibos están pausados. El comprobante permanece pendiente." });
     const lineId = Number(req.params.lineId);
     if (!Number.isSafeInteger(lineId) || lineId < 1) return res.status(400).json({ error: "Recibo inválido" });
     const outcome = await db.transaction(async () => {

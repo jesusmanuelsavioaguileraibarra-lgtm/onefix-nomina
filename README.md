@@ -2,7 +2,9 @@
 
 ## Entrega de comprobantes
 
-Al confirmar un pago en línea, el servidor crea un registro único de entrega para esa partida y prepara el PDF del recibo. La ficha de la persona define `Automático` (correo si existe; de lo contrario WhatsApp), `Correo` o `WhatsApp`. Si falta el contacto elegido o la integración, el pago permanece confirmado y el recibo figura como pendiente de contacto o configuración; nunca se marca como enviado sin respuesta del proveedor.
+Al confirmar un pago en línea, el servidor crea un registro único de entrega para esa partida y deja disponible el PDF del recibo. Los envíos están pausados por defecto, incluso si existen credenciales de correo o WhatsApp; el recibo queda pendiente. La ficha de la persona define `Automático` (correo si existe; de lo contrario WhatsApp), `Correo` o `WhatsApp`. Si falta el contacto elegido o la integración, el pago permanece confirmado y el recibo figura como pendiente de contacto o configuración; nunca se marca como enviado sin respuesta del proveedor.
+
+`ONEFIX_RECEIPT_SEND_ENABLED=1` es el interruptor privado del servidor para activar envíos. No configurarlo todavía. Antes de cambiarlo, confirmar destinatarios y consentimiento, probar el canal con un destinatario autorizado y verificar la política de reintentos. Mientras esté desactivado, tampoco funciona el reintento manual.
 
 Para activar el correo transaccional en el servidor de Vercel:
 
@@ -45,6 +47,7 @@ Primera versión de prueba para organizar empleados y subcontratistas de ONEFIX 
 - Ausencias de sueldo fijo: Administración fija un descuento global USD por persona y semana antes de generar la nómina, incluso si el importe es 0. Cada ausencia sin ese importe bloquea el cierre. El descuento aparece separado en el detalle y se resta del bruto junto con los anticipos, préstamos y daños pendientes.
 - Subcontratista: suma de tareas confirmadas no asignadas a otra nómina con fecha hasta el viernes del cierre. Así se pueden incluir tareas aprobadas tarde en la siguiente semana.
 - Neto: bruto menos el descuento por ausencias y todos los descuentos pendientes hasta el viernes. Si la suma excede el bruto, se bloquea toda la nómina sin aplicar parcialmente los saldos.
+- Revisión previa: Administración y Gerencia consultan los importes calculados por persona y los totales sin crear el cierre. Usa las mismas reglas que la generación definitiva, muestra el primer bloqueo aplicable y advierte sobre sueldos fijos sin asistencia y bruto sin proyecto. La generación vuelve a validar contra el estado actual del servidor.
 - No calcula impuestos, prestaciones ni otros conceptos legales.
 
 ## Desarrollo local

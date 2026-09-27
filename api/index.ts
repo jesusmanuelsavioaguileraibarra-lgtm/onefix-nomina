@@ -421,126 +421,177 @@ var payrollFull = async (p) => ({
     attendanceSnapshot: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot)
   }))
 });
-async function generatePayroll(weekStart) {
+async function preparePayroll(weekStart) {
   const { weekEnd: end, availableOn } = payrollPeriod(weekStart);
   const todayInFlorida = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
   if (todayInFlorida < availableOn)
     throw new Error(`La n\xF3mina del ${weekStart} al ${end} se genera desde el domingo ${availableOn}`);
-  return await db.transaction(async () => {
-    if (await row("SELECT id FROM payrolls WHERE weekStart=?", weekStart))
-      throw new Error("Esta semana ya tiene una n\xF3mina");
-    const overlap = await row("SELECT id,weekStart,weekEnd FROM payrolls WHERE weekStart<=? AND weekEnd>=? LIMIT 1", end, weekStart);
-    if (overlap)
-      throw new Error(`Este per\xEDodo coincide con la n\xF3mina #${overlap.id} (${overlap.weekStart} al ${overlap.weekEnd}); no se pueden pagar dos veces los mismos d\xEDas`);
-    const pendingDay = await row("SELECT a.date,p.name FROM daily_pays d JOIN attendance a ON a.id=d.attendanceId JOIN people p ON p.id=a.personId WHERE a.date BETWEEN ? AND ? AND d.status!='approved' LIMIT 1", weekStart, end);
-    if (pendingDay)
-      throw new Error(`Administraci\xF3n debe confirmar el pago por d\xEDa de ${pendingDay.name} (${pendingDay.date}) antes del cierre`);
-    const incompatibleDay = await row("SELECT a.date,p.name FROM daily_pays d JOIN attendance a ON a.id=d.attendanceId JOIN people p ON p.id=a.personId WHERE a.date BETWEEN ? AND ? AND (p.payType!='hora' OR p.kind!='empleado' OR a.absent=1) LIMIT 1", weekStart, end);
-    if (incompatibleDay)
-      throw new Error(`El jornal de ${incompatibleDay.name} (${incompatibleDay.date}) ya no corresponde a una persona pagada por hora; Producci\xF3n debe retirarlo`);
-    const people = await rows("SELECT * FROM people WHERE active=1 ORDER BY name");
-    const projects = await rows("SELECT id,name FROM projects");
-    const prepared = [];
-    const taskIds = [];
-    for (const person of people) {
-      let gross = 0;
-      let absenceAmount = 0;
-      let projectAllocations = [];
-      let attendanceSnapshot = null;
-      const parts = [];
-      if (person.kind === "empleado") {
-        const days = await rows("SELECT a.*,d.approvedAmount AS dailyAmount FROM attendance a LEFT JOIN daily_pays d ON d.attendanceId=a.id AND d.status='approved' WHERE a.personId=? AND a.date BETWEEN ? AND ? ORDER BY a.date,a.id", person.id, weekStart, end);
-        attendanceSnapshot = days.map((d) => ({
-          date: d.date,
-          projectName: d.projectName,
-          responsible: d.responsible,
-          timeIn: d.timeIn,
-          timeOut: d.timeOut,
-          breakMinutes: d.breakMinutes,
-          hours: d.hours,
-          overtime: d.overtime,
-          absent: !!d.absent,
-          bonus: d.bonus,
-          note: d.note,
-          dailyAmount: d.dailyAmount,
-          allocations: d.allocations ? JSON.parse(d.allocations) : d.absent ? [] : [{ projectName: d.projectName, regularHours: d.hours, overtimeHours: d.overtime }]
-        }));
-        const absences = days.filter((d) => d.absent).length;
-        const hours2 = days.reduce((s, d) => s + (d.absent ? 0 : d.hours), 0);
-        const overtime = days.reduce((s, d) => s + (d.absent ? 0 : d.overtime), 0);
-        const bonus = money(days.reduce((s, d) => s + d.bonus, 0));
-        const adjustment = person.payType === "fijo" && absences ? await row("SELECT amount FROM payroll_absence_adjustments WHERE personId=? AND weekStart=?", person.id, weekStart) : null;
-        if (person.payType === "fijo" && absences && !adjustment)
-          throw new Error(`Administraci\xF3n debe fijar el descuento por ${absences} ausencia(s) de ${person.name}, incluso si es 0 USD`);
-        const payOvertime = person.payType !== "fijo" || !!person.overtimeEnabled;
-        if (overtime > 0 && payOvertime && person.overtimeRate == null)
-          throw new Error(`Falta tarifa de horas extra para ${person.name}`);
-        const standardHours = days.reduce((s, d) => s + (d.absent || d.dailyAmount != null ? 0 : d.hours), 0);
-        const dailyTotal = money(days.reduce((s, d) => s + (d.absent ? 0 : Number(d.dailyAmount) || 0), 0));
-        const base = person.payType === "fijo" ? money(person.rate) : money(person.rate * standardHours);
-        const extra = payOvertime ? money(overtime * (person.overtimeRate || 0)) : 0;
-        gross = money(base + dailyTotal + extra + bonus);
-        const buckets = projectBuckets(projects, days);
-        if (!buckets.length || person.payType === "fijo" && buckets.every((b) => b.hours === 0)) {
-          buckets.push({ projectId: null, projectName: "Sin proyecto asignado", hours: 0, amount: 0, regular: 0, overtime: 0, bonus: 0, daily: 0 });
-        }
-        const baseWeights = buckets.map((b) => person.payType === "fijo" ? b.hours : b.regular);
-        const baseShares = splitCents(cents(base), baseWeights);
-        if (cents(base) && !baseWeights.some(Boolean))
-          baseShares[buckets.length - 1] += cents(base);
-        const dailyShares = splitCents(cents(dailyTotal), buckets.map((b) => b.daily));
-        const extraShares = splitCents(cents(extra), buckets.map((b) => b.overtime));
-        const bonusShares = splitCents(cents(bonus), buckets.map((b) => b.bonus));
-        buckets.forEach((b, i) => {
-          b.amount += baseShares[i] + dailyShares[i] + extraShares[i] + bonusShares[i];
-        });
-        projectAllocations = finalizeProjects(buckets, gross);
-        if (person.payType === "fijo")
-          parts.push(`Sueldo semanal: $${base.toFixed(2)}`);
-        else if (standardHours || !dailyTotal)
-          parts.push(`${Number(standardHours.toFixed(2))} h regulares \xD7 $${person.rate.toFixed(2)}: $${base.toFixed(2)}`);
-        for (const d of days.filter((d2) => d2.dailyAmount != null)) {
-          const portions = d.allocations ? JSON.parse(d.allocations) : [{ projectName: d.projectName, regularHours: d.hours, overtimeHours: d.overtime }];
-          const locations = portions.map((a) => `${a.projectName}: ${Number((a.regularHours + a.overtimeHours).toFixed(2))} h`).join(", ");
-          parts.push(`Pago por d\xEDa ${d.date} (${locations}): $${Number(d.dailyAmount).toFixed(2)} en lugar de sus horas regulares`);
-        }
-        if (overtime)
-          parts.push(payOvertime ? `Horas extra ${Number(overtime.toFixed(2))} h \xD7 $${person.overtimeRate.toFixed(2)}: $${extra.toFixed(2)}` : `Horas extra ${Number(overtime.toFixed(2))} h: registradas, no pagadas (Gerencia)`);
-        if (bonus)
-          parts.push(`Bonos: $${bonus.toFixed(2)}`);
-        if (adjustment) {
-          absenceAmount = adjustment.amount;
-          parts.push(`Ausencias ${absences} (importe fijado por Administraci\xF3n): -$${adjustment.amount.toFixed(2)}`);
-        }
-      } else {
-        const tasks = await rows("SELECT t.*,pr.name AS projectName FROM tasks t JOIN projects pr ON pr.id=t.projectId WHERE t.personId=? AND t.approved=1 AND t.payrollId IS NULL AND t.date<=? ORDER BY t.date,t.id", person.id, end);
-        for (const task of tasks) {
-          gross = money(gross + task.amount);
-          parts.push(`Tarea #${task.id} ${task.description}: $${task.amount.toFixed(2)}`);
-          taskIds.push(task.id);
-        }
-        projectAllocations = finalizeProjects(projectBuckets(projects, tasks, true), gross);
+  if (await row("SELECT id FROM payrolls WHERE weekStart=?", weekStart))
+    throw new Error("Esta semana ya tiene una n\xF3mina");
+  const overlap = await row("SELECT id,weekStart,weekEnd FROM payrolls WHERE weekStart<=? AND weekEnd>=? LIMIT 1", end, weekStart);
+  if (overlap)
+    throw new Error(`Este per\xEDodo coincide con la n\xF3mina #${overlap.id} (${overlap.weekStart} al ${overlap.weekEnd}); no se pueden pagar dos veces los mismos d\xEDas`);
+  const pendingDay = await row("SELECT a.date,p.name FROM daily_pays d JOIN attendance a ON a.id=d.attendanceId JOIN people p ON p.id=a.personId WHERE a.date BETWEEN ? AND ? AND d.status!='approved' LIMIT 1", weekStart, end);
+  if (pendingDay)
+    throw new Error(`Administraci\xF3n debe confirmar el pago por d\xEDa de ${pendingDay.name} (${pendingDay.date}) antes del cierre`);
+  const incompatibleDay = await row("SELECT a.date,p.name FROM daily_pays d JOIN attendance a ON a.id=d.attendanceId JOIN people p ON p.id=a.personId WHERE a.date BETWEEN ? AND ? AND (p.payType!='hora' OR p.kind!='empleado' OR a.absent=1) LIMIT 1", weekStart, end);
+  if (incompatibleDay)
+    throw new Error(`El jornal de ${incompatibleDay.name} (${incompatibleDay.date}) ya no corresponde a una persona pagada por hora; Producci\xF3n debe retirarlo`);
+  const people = await rows("SELECT * FROM people WHERE active=1 ORDER BY name");
+  const projects = await rows("SELECT id,name FROM projects");
+  const prepared = [];
+  const taskIds = [];
+  const warnings = [];
+  for (const person of people) {
+    let gross = 0;
+    let absenceAmount = 0;
+    let projectAllocations = [];
+    let attendanceSnapshot = null;
+    const parts = [];
+    if (person.kind === "empleado") {
+      const days = await rows("SELECT a.*,d.approvedAmount AS dailyAmount FROM attendance a LEFT JOIN daily_pays d ON d.attendanceId=a.id AND d.status='approved' WHERE a.personId=? AND a.date BETWEEN ? AND ? ORDER BY a.date,a.id", person.id, weekStart, end);
+      if (person.payType === "fijo" && !days.length)
+        warnings.push(`${person.name}: sueldo fijo completo sin asistencia registrada esta semana. Administraci\xF3n debe comprobarlo.`);
+      attendanceSnapshot = days.map((d) => ({
+        date: d.date,
+        projectName: d.projectName,
+        responsible: d.responsible,
+        timeIn: d.timeIn,
+        timeOut: d.timeOut,
+        breakMinutes: d.breakMinutes,
+        hours: d.hours,
+        overtime: d.overtime,
+        absent: !!d.absent,
+        bonus: d.bonus,
+        note: d.note,
+        dailyAmount: d.dailyAmount,
+        allocations: d.allocations ? JSON.parse(d.allocations) : d.absent ? [] : [{ projectName: d.projectName, regularHours: d.hours, overtimeHours: d.overtime }]
+      }));
+      const absences = days.filter((d) => d.absent).length;
+      const hours2 = days.reduce((s, d) => s + (d.absent ? 0 : d.hours), 0);
+      const overtime = days.reduce((s, d) => s + (d.absent ? 0 : d.overtime), 0);
+      const bonus = money(days.reduce((s, d) => s + d.bonus, 0));
+      const adjustment = person.payType === "fijo" && absences ? await row("SELECT amount FROM payroll_absence_adjustments WHERE personId=? AND weekStart=?", person.id, weekStart) : null;
+      if (person.payType === "fijo" && absences && !adjustment)
+        throw new Error(`Administraci\xF3n debe fijar el descuento por ${absences} ausencia(s) de ${person.name}, incluso si es 0 USD`);
+      const payOvertime = person.payType !== "fijo" || !!person.overtimeEnabled;
+      if (overtime > 0 && payOvertime && person.overtimeRate == null)
+        throw new Error(`Falta tarifa de horas extra para ${person.name}`);
+      const standardHours = days.reduce((s, d) => s + (d.absent || d.dailyAmount != null ? 0 : d.hours), 0);
+      const dailyTotal = money(days.reduce((s, d) => s + (d.absent ? 0 : Number(d.dailyAmount) || 0), 0));
+      const base = person.payType === "fijo" ? money(person.rate) : money(person.rate * standardHours);
+      const extra = payOvertime ? money(overtime * (person.overtimeRate || 0)) : 0;
+      gross = money(base + dailyTotal + extra + bonus);
+      const buckets = projectBuckets(projects, days);
+      if (!buckets.length || person.payType === "fijo" && buckets.every((b) => b.hours === 0)) {
+        buckets.push({ projectId: null, projectName: "Sin proyecto asignado", hours: 0, amount: 0, regular: 0, overtime: 0, bonus: 0, daily: 0 });
       }
-      const allocations = [];
-      const deductions = await rows("SELECT * FROM deductions WHERE personId=? AND date<=? AND amount>applied ORDER BY date,id", person.id, end);
-      const pending = money(deductions.reduce((sum, d) => sum + money(d.amount - d.applied), 0));
-      if (money(absenceAmount + pending) > gross)
-        throw new Error(`Descuentos de ${person.name} (USD ${money(absenceAmount + pending).toFixed(2)}) superan lo devengado (USD ${gross.toFixed(2)}). Ajusta los importes antes de generar la n\xF3mina`);
-      if (gross <= 0)
-        continue;
-      let available = money(gross - absenceAmount);
-      for (const d of deductions) {
-        const applied = money(d.amount - d.applied);
-        if (applied <= 0)
-          continue;
-        allocations.push({ deductionId: d.id, amount: applied });
-        parts.push(`${d.kind} #${d.id}: -$${applied.toFixed(2)}`);
-        available = money(available - applied);
+      const baseWeights = buckets.map((b) => person.payType === "fijo" ? b.hours : b.regular);
+      const baseShares = splitCents(cents(base), baseWeights);
+      if (cents(base) && !baseWeights.some(Boolean))
+        baseShares[buckets.length - 1] += cents(base);
+      const dailyShares = splitCents(cents(dailyTotal), buckets.map((b) => b.daily));
+      const extraShares = splitCents(cents(extra), buckets.map((b) => b.overtime));
+      const bonusShares = splitCents(cents(bonus), buckets.map((b) => b.bonus));
+      buckets.forEach((b, i) => {
+        b.amount += baseShares[i] + dailyShares[i] + extraShares[i] + bonusShares[i];
+      });
+      projectAllocations = finalizeProjects(buckets, gross);
+      if (gross > 0 && projectAllocations.some((a) => a.projectName === "Sin proyecto asignado" && a.amount > 0))
+        warnings.push(`${person.name}: parte del bruto no tiene proyecto asignado.`);
+      if (person.payType === "fijo")
+        parts.push(`Sueldo semanal: $${base.toFixed(2)}`);
+      else if (standardHours || !dailyTotal)
+        parts.push(`${Number(standardHours.toFixed(2))} h regulares \xD7 $${person.rate.toFixed(2)}: $${base.toFixed(2)}`);
+      for (const d of days.filter((d2) => d2.dailyAmount != null)) {
+        const portions = d.allocations ? JSON.parse(d.allocations) : [{ projectName: d.projectName, regularHours: d.hours, overtimeHours: d.overtime }];
+        const locations = portions.map((a) => `${a.projectName}: ${Number((a.regularHours + a.overtimeHours).toFixed(2))} h`).join(", ");
+        parts.push(`Pago por d\xEDa ${d.date} (${locations}): $${Number(d.dailyAmount).toFixed(2)} en lugar de sus horas regulares`);
       }
-      prepared.push({ person, gross, net: available, deductions: money(gross - available), allocations, projectAllocations, attendanceSnapshot, details: parts.join("\n") });
+      if (overtime)
+        parts.push(payOvertime ? `Horas extra ${Number(overtime.toFixed(2))} h \xD7 $${person.overtimeRate.toFixed(2)}: $${extra.toFixed(2)}` : `Horas extra ${Number(overtime.toFixed(2))} h: registradas, no pagadas (Gerencia)`);
+      if (bonus)
+        parts.push(`Bonos: $${bonus.toFixed(2)}`);
+      if (adjustment) {
+        absenceAmount = adjustment.amount;
+        parts.push(`Ausencias ${absences} (importe fijado por Administraci\xF3n): -$${adjustment.amount.toFixed(2)}`);
+      }
+    } else {
+      const tasks = await rows("SELECT t.*,pr.name AS projectName FROM tasks t JOIN projects pr ON pr.id=t.projectId WHERE t.personId=? AND t.approved=1 AND t.payrollId IS NULL AND t.date<=? ORDER BY t.date,t.id", person.id, end);
+      for (const task of tasks) {
+        gross = money(gross + task.amount);
+        parts.push(`Tarea #${task.id} ${task.description}: $${task.amount.toFixed(2)}`);
+        taskIds.push(task.id);
+      }
+      projectAllocations = finalizeProjects(projectBuckets(projects, tasks, true), gross);
     }
-    if (!prepared.length)
-      throw new Error("No hay conceptos para esta semana. Registra asistencia o tareas aprobadas");
+    const allocations = [];
+    const deductions = await rows("SELECT * FROM deductions WHERE personId=? AND date<=? AND amount>applied ORDER BY date,id", person.id, end);
+    const pending = money(deductions.reduce((sum, d) => sum + money(d.amount - d.applied), 0));
+    if (money(absenceAmount + pending) > gross)
+      throw new Error(`Descuentos de ${person.name} (USD ${money(absenceAmount + pending).toFixed(2)}) superan lo devengado (USD ${gross.toFixed(2)}). Ajusta los importes antes de generar la n\xF3mina`);
+    if (gross <= 0)
+      continue;
+    let available = money(gross - absenceAmount);
+    for (const d of deductions) {
+      const applied = money(d.amount - d.applied);
+      if (applied <= 0)
+        continue;
+      allocations.push({ deductionId: d.id, amount: applied });
+      parts.push(`${d.kind} #${d.id}: -$${applied.toFixed(2)}`);
+      available = money(available - applied);
+    }
+    prepared.push({ person, gross, net: available, deductions: money(gross - available), allocations, projectAllocations, attendanceSnapshot, details: parts.join("\n") });
+  }
+  if (!prepared.length)
+    throw new Error("No hay conceptos para esta semana. Registra asistencia o tareas aprobadas");
+  return { end, availableOn, prepared, taskIds, warnings };
+}
+async function previewPayroll(weekStart) {
+  const { weekEnd, availableOn } = payrollPeriod(weekStart);
+  try {
+    const { prepared, warnings } = await preparePayroll(weekStart);
+    return {
+      weekStart,
+      weekEnd,
+      availableOn,
+      ready: true,
+      blockers: [],
+      warnings,
+      lines: prepared.map((p) => ({
+        personId: p.person.id,
+        personName: p.person.name,
+        kind: p.person.kind,
+        gross: p.gross,
+        deductions: p.deductions,
+        net: p.net,
+        hours: p.attendanceSnapshot?.reduce((sum, d) => sum + (d.absent ? 0 : d.hours + d.overtime), 0) ?? null,
+        projectCount: p.projectAllocations.filter((a) => a.amount > 0).length
+      })),
+      totals: {
+        gross: money(prepared.reduce((sum, p) => sum + p.gross, 0)),
+        deductions: money(prepared.reduce((sum, p) => sum + p.deductions, 0)),
+        net: money(prepared.reduce((sum, p) => sum + p.net, 0))
+      }
+    };
+  } catch (error) {
+    if (!(error instanceof Error) || !/^(La nómina del|Esta semana|Este período|Administración debe|El jornal de|Falta tarifa|Descuentos de|No hay conceptos)/.test(error.message))
+      throw error;
+    return {
+      weekStart,
+      weekEnd,
+      availableOn,
+      ready: false,
+      blockers: [error.message],
+      warnings: [],
+      lines: [],
+      totals: { gross: 0, deductions: 0, net: 0 }
+    };
+  }
+}
+async function generatePayroll(weekStart) {
+  return await db.transaction(async () => {
+    const { end, prepared, taskIds } = await preparePayroll(weekStart);
     const created = await run("INSERT INTO payrolls (weekStart,weekEnd,status,submittedAt,note) VALUES (?,?,?,?,?)", weekStart, end, "borrador", (/* @__PURE__ */ new Date()).toISOString(), "");
     const id = Number(created.lastInsertRowid);
     for (const p of prepared) {
@@ -1318,6 +1369,7 @@ async function sendWhatsapp(destination, pdf2, lineId, onNetworkStart) {
   return result.messages[0].id;
 }
 async function dispatchReceipt(lineId) {
+  if (process.env.ONEFIX_RECEIPT_SEND_ENABLED !== "1") return;
   const claimed = await db.transaction(async () => {
     const d = await row(`SELECT * FROM receipt_deliveries WHERE "lineId"=? FOR UPDATE`, lineId);
     if (!d || !["pending", "failed", "configuration"].includes(d.status)) return null;
@@ -1411,6 +1463,8 @@ function registerReceiptDelivery(app) {
     res.json(items);
   });
   app.post("/api/receipt-deliveries/:lineId/retry", allow("administracion"), async (req, res) => {
+    if (process.env.ONEFIX_RECEIPT_SEND_ENABLED !== "1")
+      return res.status(423).json({ error: "Los env\xEDos de recibos est\xE1n pausados. El comprobante permanece pendiente." });
     const lineId = Number(req.params.lineId);
     if (!Number.isSafeInteger(lineId) || lineId < 1) return res.status(400).json({ error: "Recibo inv\xE1lido" });
     const outcome = await db.transaction(async () => {
@@ -1860,6 +1914,13 @@ async function registerRoutes(httpServer, app) {
       if (d.photo && (d.photo.length > 2e6 || !/^data:image\/(png|jpe?g|webp);base64,/.test(d.photo)))
         throw new Error("La foto debe ser JPG, PNG o WEBP y pesar menos de 1,5 MB");
       res.json({ id: (await run("INSERT INTO deductions (personId,kind,amount,date,note,photo,manager) VALUES (?,?,?,?,?,?,?)", d.personId, d.kind, money(d.amount), d.date, d.note, d.photo, d.manager)).lastInsertRowid });
+    } catch (e) {
+      issue2(res, e);
+    }
+  });
+  app.get("/api/payrolls/preview", allow("administracion", "gerencia"), async (req, res) => {
+    try {
+      res.json(await previewPayroll(String(req.query.weekStart || "")));
     } catch (e) {
       issue2(res, e);
     }
