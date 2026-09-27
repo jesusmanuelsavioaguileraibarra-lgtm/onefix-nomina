@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { registerRoutes } from "./routes";
 import { verifyDatabase } from "./pg-storage";
 import { ensureContractTrackingSchema } from "./contract-tracking";
+import { ensureReceivablesSchema } from "./receivables";
 
 declare module "http" {
   interface IncomingMessage {
@@ -13,6 +14,7 @@ declare module "http" {
 export async function createApp() {
   await verifyDatabase();
   await ensureContractTrackingSchema();
+  await ensureReceivablesSchema();
   const app = express();
   const httpServer = createServer(app);
 

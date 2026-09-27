@@ -11,6 +11,7 @@ import { initialLoadOnly } from "@shared/activation";
 import { all, dateValid, db, generatePayroll, money, payrollFull, row, rows, run } from "./storage";
 import { registerAuth, requireAuth, downloadAuth, allow, audit } from "./auth";
 import { registerContractTracking } from "./contract-tracking";
+import { registerReceivables } from "./receivables";
 import { createReceiptPdf } from "./receipt-pdf";
 function issue(res: any, e: unknown) {
     let message = e && typeof e === "object" && "issues" in e && Array.isArray((e as any).issues)
@@ -65,18 +66,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             && !["GET", "HEAD", "OPTIONS"].includes(req.method)
             && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))
             && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
+            && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
             return res.status(423).json({ error: "En la operación real solo se permiten fichas, asistencia y seguimiento privado de contratos. Nómina, jornales y pagos siguen bloqueados." });
         }
         if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method)
             && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")
             && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
+            && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
             return res.status(423).json({ error: "La nómina y los pagos siguen bloqueados." });
         }
         next();
     });
     registerContractTracking(app);
+    registerReceivables(app);
     app.get("/api/state", async (req, res) => {
         const production = req.currentUser!.role === "produccion";
         const realProduction = production && process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1";

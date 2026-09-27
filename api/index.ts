@@ -850,6 +850,66 @@ function registerContractTracking(app) {
   });
 }
 
+// server/receivables.ts
+import { z as z3 } from "zod";
+async function ensureReceivablesSchema() {
+  await run(`CREATE TABLE IF NOT EXISTS receivable_invoices (
+    id BIGSERIAL PRIMARY KEY,
+    source_sha TEXT NOT NULL,
+    source_row INTEGER NOT NULL,
+    job TEXT NOT NULL DEFAULT '',
+    invoice_number TEXT NOT NULL DEFAULT '',
+    issue_date DATE,
+    raw_date TEXT NOT NULL DEFAULT '',
+    gross_cents BIGINT,
+    paid_cents BIGINT,
+    balance_2025_cents BIGINT,
+    balance_2026_cents BIGINT,
+    note TEXT NOT NULL DEFAULT '',
+    client TEXT NOT NULL DEFAULT '',
+    cancelled BOOLEAN NOT NULL DEFAULT FALSE,
+    review_reasons TEXT NOT NULL DEFAULT '',
+    due_date DATE,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by BIGINT REFERENCES app_users(id),
+    UNIQUE (source_sha, source_row)
+  )`);
+}
+var dueDateInput = z3.object({
+  dueDate: z3.union([z3.iso.date(), z3.literal("")]).nullable()
+});
+function registerReceivables(app) {
+  app.get("/api/receivables", allow("administracion", "gerencia"), async (_req, res) => {
+    const invoices = await rows(`SELECT id,source_sha,source_row,job,invoice_number,
+      issue_date::text AS issue_date,raw_date,gross_cents,paid_cents,
+      balance_2025_cents,balance_2026_cents,note,client,cancelled,review_reasons,
+      due_date::text AS due_date,updated_at
+      FROM receivable_invoices ORDER BY source_row ASC`);
+    res.json(invoices);
+  });
+  app.patch("/api/receivables/:id/due-date", allow("administracion", "gerencia"), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: "Registro inv\xE1lido" });
+    const parsed = dueDateInput.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: "Ingresa una fecha v\xE1lida o d\xE9jala vac\xEDa" });
+    const dueDate = parsed.data.dueDate || null;
+    try {
+      const updated = await row(
+        `UPDATE receivable_invoices SET due_date=?,updated_at=now(),updated_by=?
+        WHERE id=? RETURNING id,due_date::text AS due_date`,
+        dueDate,
+        req.currentUser.id,
+        id
+      );
+      if (!updated) return res.status(404).json({ error: "Registro no encontrado" });
+      await audit(req.currentUser.id, "receivable_due_date_update", `${id}:${dueDate || "sin fecha"}`);
+      res.json(updated);
+    } catch {
+      res.status(400).json({ error: "No se pudo guardar el vencimiento" });
+    }
+  });
+}
+
 // server/receipt-pdf.ts
 import PDFDocument from "pdfkit";
 var BLACK = "#151515";
@@ -1072,15 +1132,16 @@ async function registerRoutes(httpServer, app) {
     return requireAuth(req, res, next);
   });
   app.use("/api", (req, res, next) => {
-    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "En la operaci\xF3n real solo se permiten fichas, asistencia y seguimiento privado de contratos. N\xF3mina, jornales y pagos siguen bloqueados." });
     }
-    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "La n\xF3mina y los pagos siguen bloqueados." });
     }
     next();
   });
   registerContractTracking(app);
+  registerReceivables(app);
   app.get("/api/state", async (req, res) => {
     const production = req.currentUser.role === "produccion";
     const realProduction = production && process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1";
@@ -1781,6 +1842,7 @@ async function registerRoutes(httpServer, app) {
 async function createApp() {
   await verifyDatabase();
   await ensureContractTrackingSchema();
+  await ensureReceivablesSchema();
   const app = express();
   const httpServer = createServer(app);
   app.use(express.json({
