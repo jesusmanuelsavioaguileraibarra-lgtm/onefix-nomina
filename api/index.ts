@@ -910,6 +910,12 @@ function registerReceivables(app) {
   });
 }
 
+// server/operational-access.ts
+function operationalPayrollWrite(method, path, role) {
+  if (method !== "POST" || role === "produccion") return false;
+  return /^\/payrolls$/.test(path) || /^\/payrolls\/absence-adjustment$/.test(path) || /^\/payrolls\/\d+(?:\/lines\/\d+\/(?:review|observation)|\/(?:review|approve|withdraw))$/.test(path) || /^\/people\/\d+\/fixed-overtime$/.test(path) || /^\/daily-pay\/\d+\/confirm$/.test(path) || /^\/deductions$/.test(path) || /^\/sync\/payments$/.test(path);
+}
+
 // server/receipt-pdf.ts
 import PDFDocument from "pdfkit";
 var BLACK = "#151515";
@@ -1132,10 +1138,10 @@ async function registerRoutes(httpServer, app) {
     return requireAuth(req, res, next);
   });
   app.use("/api", (req, res, next) => {
-    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
-      return res.status(423).json({ error: "En la operaci\xF3n real solo se permiten fichas, asistencia y seguimiento privado de contratos. N\xF3mina, jornales y pagos siguen bloqueados." });
+    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+      return res.status(423).json({ error: "Esta operaci\xF3n no est\xE1 habilitada. N\xF3mina y pagos solo se gestionan por Administraci\xF3n y Gerencia, seg\xFAn su etapa de aprobaci\xF3n." });
     }
-    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "La n\xF3mina y los pagos siguen bloqueados." });
     }
     next();
