@@ -12,6 +12,7 @@ const usd=(cents:number|null)=>cents===null?"No indicado":
   new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(cents/100);
 function status(item:Invoice,today:string) {
   if(item.cancelled)return "Cancelada";
+  if(!item.invoice_number.startsWith("INV"))return "Sin factura emitida";
   if(!item.due_date)return "Sin vencimiento";
   const balance=(item.balance_2025_cents||0)+(item.balance_2026_cents||0);
   if(balance<=0)return "Sin saldo positivo";
@@ -39,7 +40,7 @@ export default function Receivables({offline}:{offline:boolean}) {
         ||filter==="canceladas"&&i.cancelled||filter==="sin-fecha"&&!i.due_date&&!i.cancelled
         ||filter==="vencidas"&&status(i,today)==="Vencida");
   }),[items,search,filter,today]);
-  const collectible=visible.filter(i=>!i.cancelled).reduce((sum,i)=>sum+Math.max(0,(i.balance_2025_cents||0)+(i.balance_2026_cents||0)),0);
+  const collectible=visible.filter(i=>!i.cancelled&&i.invoice_number.startsWith("INV")).reduce((sum,i)=>sum+Math.max(0,(i.balance_2025_cents||0)+(i.balance_2026_cents||0)),0);
   async function save(event:React.FormEvent<HTMLFormElement>){
     event.preventDefault();
     if(!editing)return;
@@ -56,7 +57,7 @@ export default function Receivables({offline}:{offline:boolean}) {
   return <div className="tracking receivables" data-testid="receivables">
     <div className="tracking-intro"><div><span className="eyebrow">CUENTAS POR COBRAR · USD</span><h2>Facturas y vencimientos</h2>
       <p>Registro independiente de nómina y contratos de subcontratistas. Cada fila conserva su referencia al Excel original.</p></div></div>
-    <div className="scope-note">Los vencimientos del archivo no estaban indicados. Permanecen vacíos hasta que Administración o Gerencia los definan. Las canceladas se conservan, pero no suman al saldo cobrable. Los importes marcados para revisión no se han conciliado.</div>
+    <div className="scope-note">Los vencimientos del archivo no estaban indicados. Permanecen vacíos hasta que Administración o Gerencia los definan. Las canceladas y las filas sin factura emitida se conservan, pero no suman al saldo cobrable. Los importes marcados para revisión no se han conciliado.</div>
     {offline&&<div className="feedback error" role="alert">Esta área privada requiere conexión. No se conserva una copia local.</div>}
     {isError&&<div className="feedback error" role="alert">No se pudieron cargar las facturas. <button onClick={()=>refetch()} data-testid="button-retry-receivables">Reintentar</button></div>}
     {message&&<div className="feedback success" role="status">{message}</div>}
@@ -69,7 +70,7 @@ export default function Receivables({offline}:{offline:boolean}) {
     <div className="tracking-metrics"><div><span>Filas visibles</span><b data-testid="text-invoice-count">{visible.length}</b></div>
       <div><span>Por verificar</span><b>{visible.filter(i=>!!i.review_reasons).length}</b></div>
       <div><span>Sin vencimiento</span><b>{visible.filter(i=>!i.due_date&&!i.cancelled).length}</b></div>
-      <div><span>Saldo positivo informado, sin canceladas</span><b data-testid="text-collectible">{usd(collectible)}</b></div></div>
+      <div><span>Saldo positivo informado en facturas no canceladas</span><b data-testid="text-collectible">{usd(collectible)}</b></div></div>
     <section className="panel"><div className="panel-head"><div><h2>Detalle de facturas</h2><p>El saldo mostrado procede de las columnas 2025 y 2026 del archivo; no equivale a un importe conciliado.</p></div></div>
       {isLoading?<div className="empty">Cargando facturas…</div>:visible.length?<div className="table-wrap"><table><thead><tr><th>Fila</th><th>Factura</th><th>Job / cliente</th><th>Fecha emisión</th><th>Importe</th><th>Pagos</th><th>Saldo 2025</th><th>Saldo 2026</th><th>Vencimiento</th><th>Estado / revisión</th><th>Observaciones</th><th>Acción</th></tr></thead>
         <tbody>{visible.map(i=><tr key={i.id} data-testid={`receivable-row-${i.source_row}`}>
