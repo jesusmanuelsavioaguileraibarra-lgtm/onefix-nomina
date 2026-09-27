@@ -10,7 +10,8 @@ let unlockedKey:CryptoKey|null=null, unlockedUser:number|null=null;
 function openDb():Promise<IDBDatabase> {
   return new Promise((resolve,reject)=>{
     if(!("indexedDB" in window)) return reject(new Error("Almacenamiento local no disponible"));
-    const request=indexedDB.open("onefix-fictitious-beta",1);
+    // Never reuse the beta's storage for real employees or attendance.
+    const request=indexedDB.open("onefix-real-attendance-v1",1);
     request.onupgradeneeded=()=>{
       const db=request.result;
       if(!db.objectStoreNames.contains("settings")) db.createObjectStore("settings");
@@ -53,7 +54,7 @@ async function unseal<T>(key:CryptoKey,value:Encrypted):Promise<T> {
 export function lockOffline() {unlockedKey=null;unlockedUser=null;}
 export function offlineUnlocked(userId:number) {return unlockedUser===userId&&unlockedKey!==null;}
 export async function unlockOffline(userId:number,pin:string,create=false) {
-  if(!/^\d{4}$/.test(pin))throw new Error("Indica el PIN de cuatro dígitos.");
+  if(!/^\d{4}$/.test(pin) && pin.length<12)throw new Error("Ingresa tu contraseña de al menos 12 caracteres.");
   let device=await loadLocal<CryptoKey>(pepperKey(userId));
   let marker=await loadLocal<Encrypted>(markerKey(userId));
   if(!device || !marker) {

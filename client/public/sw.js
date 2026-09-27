@@ -1,4 +1,4 @@
-const CACHE="onefix-fictitious-beta-v2";
+const CACHE="onefix-real-attendance-v1";
 self.addEventListener("install",event=>{
   event.waitUntil((async()=>{
     const shell=new URL("./index.html",self.registration.scope);

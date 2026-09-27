@@ -58,29 +58,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         return requireAuth(req, res, next);
     });
     app.use("/api", (req, res, next) => {
-        // Real employee intake is intentionally online-only. Payroll and payment
-        // operations remain locked until their production controls are verified.
+        // Real production may register attendance and submit conflicts. Payroll,
+        // daily pay, payment and all other writes remain locked.
         if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1"
             && !["GET", "HEAD", "OPTIONS"].includes(req.method)
             && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))
+            && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
-            return res.status(423).json({ error: "La carga real solo permite registrar y corregir personas. Asistencia, nómina y pagos siguen bloqueados hasta su validación." });
+            return res.status(423).json({ error: "En la operación real solo se permiten fichas, asistencia y seguimiento privado de contratos. Nómina, jornales y pagos siguen bloqueados." });
         }
         if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method)
             && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")
+            && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
-            return res.status(423).json({ error: "Hasta el 26/09/2026 solo se permite cargar y corregir fichas de personas. La asistencia, nómina y pagos se habilitan mañana." });
+            return res.status(423).json({ error: "La nómina y los pagos siguen bloqueados." });
         }
         next();
     });
     registerContractTracking(app);
     app.get("/api/state", async (req, res) => {
-        const payrolls = await Promise.all((await all("payrolls")).map(payrollFull));
         const production = req.currentUser!.role === "produccion";
+        const realProduction = production && process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1";
+        const payrolls = production ? [] : await Promise.all((await all("payrolls")).map(payrollFull));
         res.json({
-            people: (await all("people")).map(p => production && p.kind !== "empleado" ? ({ id: p.id, name: p.name, kind: p.kind, payType: p.payType, active: !!p.active }) : ({ ...p, active: !!p.active })),
-            projects: (await all("projects")), contracts: production ? (await all("contracts")).map(c => ({ id: c.id, number: c.number, personId: c.personId, projectId: c.projectId, authorizedAmount: c.authorizedAmount })) : (await all("contracts")),
-            tasks: (await all("tasks")).map(t => ({ ...t, approved: !!t.approved })),
+            people: (await all("people")).filter(p => !realProduction || p.kind === "empleado").map(p => production && p.kind !== "empleado" ? ({ id: p.id, name: p.name, kind: p.kind, payType: p.payType, active: !!p.active }) : ({ ...p, active: !!p.active })),
+            projects: realProduction ? (await all("projects")).map(p => ({ id: p.id, name: p.name })) : (await all("projects")),
+            contracts: realProduction ? [] : production ? (await all("contracts")).map(c => ({ id: c.id, number: c.number, personId: c.personId, projectId: c.projectId, authorizedAmount: c.authorizedAmount })) : (await all("contracts")),
+            tasks: realProduction ? [] : (await all("tasks")).map(t => ({ ...t, approved: !!t.approved })),
             attendance: (await all("attendance")).map(a => ({ ...a, absent: !!a.absent, allocations: a.allocations ? JSON.parse(a.allocations) : null })),
             attendanceConflicts: req.currentUser!.role === "administracion"
                 ? (await rows(`SELECT c.*,p.name AS personName,a.projectName AS currentProject,a.timeIn AS currentTimeIn,a.timeOut AS currentTimeOut,a.responsible AS currentResponsible,
@@ -90,7 +94,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           LEFT JOIN attendance a ON a.personId=c.personId AND a.date=c.date
           WHERE c.status='pending' ORDER BY c.submittedAt DESC`)).map(c => ({ ...c, proposed: JSON.parse(c.proposed), currentAllocations: c.currentAllocations ? JSON.parse(c.currentAllocations) : [] }))
                 : [],
-            dailyPays: (await all("daily_pays")),
+            dailyPays: realProduction ? [] : (await all("daily_pays")),
             deductions: production ? [] : (await all("deductions")).map(d => ({ ...d, photo: d.photo ? "adjunta" : null })),
             payrolls: production ? [] : payrolls, amendments: production ? [] : (await all("amendments")),
             absenceAdjustments: production ? [] : (await all("payroll_absence_adjustments")),
