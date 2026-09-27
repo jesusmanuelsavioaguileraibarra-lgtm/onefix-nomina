@@ -6,13 +6,14 @@ import express from "express";
 import { createServer } from "node:http";
 
 // server/routes.ts
-import PDFDocument3 from "pdfkit";
+import PDFDocument2 from "pdfkit";
 
 // shared/schema.ts
 import { z } from "zod";
 var personInput = z.object({
   name: z.string().trim().min(2),
   kind: z.enum(["empleado", "subcontratista"]),
+  jobTitle: z.string().trim().max(120).default(""),
   document: z.string().trim().min(1),
   phone: z.string().trim().min(1),
   email: z.string().trim().default(""),
@@ -169,6 +170,7 @@ var columns = /* @__PURE__ */ new Set([
   "overtimeRate",
   "overtimeEnabled",
   "authorizedAmount",
+  "jobTitle",
   "projectName",
   "timeIn",
   "timeOut",
@@ -540,7 +542,7 @@ async function generatePayroll(weekStart) {
     const created = await run("INSERT INTO payrolls (weekStart,weekEnd,status,submittedAt,note) VALUES (?,?,?,?,?)", weekStart, end, "borrador", (/* @__PURE__ */ new Date()).toISOString(), "");
     const id = Number(created.lastInsertRowid);
     for (const p of prepared) {
-      await run("INSERT INTO payroll_lines (payrollId,personId,personName,kind,gross,deductions,net,details,allocations,projectAllocations,attendanceSnapshot) VALUES (?,?,?,?,?,?,?,?,?,?,?)", id, p.person.id, p.person.name, p.person.kind, p.gross, p.deductions, p.net, p.details, JSON.stringify(p.allocations), JSON.stringify(p.projectAllocations), p.attendanceSnapshot === null ? null : JSON.stringify(p.attendanceSnapshot));
+      await run("INSERT INTO payroll_lines (payrollId,personId,personName,kind,jobTitle,gross,deductions,net,details,allocations,projectAllocations,attendanceSnapshot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", id, p.person.id, p.person.name, p.person.kind, p.person.jobTitle, p.gross, p.deductions, p.net, p.details, JSON.stringify(p.allocations), JSON.stringify(p.projectAllocations), p.attendanceSnapshot === null ? null : JSON.stringify(p.attendanceSnapshot));
       for (const a of p.allocations)
         await run("UPDATE deductions SET applied=ROUND(applied+?,2) WHERE id=?", a.amount, a.deductionId);
     }
@@ -901,7 +903,8 @@ function layout(doc, receipt) {
   y = 95;
   for (const [leftLabel, leftValue, rightLabel, rightValue] of [
     ["Persona", receipt.personName, "Per\xEDodo", `${receipt.weekStart} al ${receipt.weekEnd}`],
-    ["Documento", value(receipt.document), "Tipo", value(receipt.kind)],
+    ["Cargo", value(receipt.jobTitle, "No registrado en esta n\xF3mina"), "Tipo", value(receipt.kind)],
+    ["Documento", value(receipt.document), "N\xF3mina", `#${receipt.payrollId}`],
     ["Tel\xE9fono", value(receipt.phone), "Correo", value(receipt.email)],
     ["Banco", value(receipt.bank), "Cuenta", value(receipt.account, "No registrada")]
   ]) {
@@ -993,12 +996,15 @@ function layout(doc, receipt) {
   y += 31;
   heading("Estado del pago");
   paragraph(receipt.paid ? `PAGADO  |  M\xE9todo: ${value(receipt.method)}  |  Referencia: ${value(receipt.reference)}  |  Registro: ${value(receipt.paidAt)}` : "APROBADO. PAGO PENDIENTE.");
-  y += 24;
-  rule(BLACK);
-  y += 7;
-  text("Administraci\xF3n / ONEFIX", LEFT, 246, 8, true);
-  text("Recibido por", 307, 267, 8, true);
-  y += 22;
+  y += 27;
+  doc.moveTo(LEFT, y).lineTo(280, y).lineWidth(0.8).strokeColor(BLACK).stroke();
+  doc.moveTo(307, y).lineTo(RIGHT, y).lineWidth(0.8).strokeColor(BLACK).stroke();
+  y += 8;
+  text("Firma del trabajador", LEFT, 246, 8, true);
+  text("Fecha de recepci\xF3n", 307, 267, 8, true);
+  y += 12;
+  paragraph("La firma es un espacio para completar por el trabajador; este PDF no acredita que haya firmado.", GRAY, 7.5);
+  y += 5;
   rule(ORANGE);
   y += 8;
   paragraph("ONEFIX CONSTRUCTION  |  Documento operativo sin c\xE1lculo de conceptos legales.", GRAY, 7.5);
@@ -1020,113 +1026,6 @@ function createReceiptPdf(receipt) {
   return doc;
 }
 
-// server/check-voucher-pdf.ts
-import PDFDocument2 from "pdfkit";
-var BLACK2 = "#151515";
-var ORANGE2 = "#E87512";
-var MUTED = "#555555";
-var ONES = ["", "UNO", "DOS", "TRES", "CUATRO", "CINCO", "SEIS", "SIETE", "OCHO", "NUEVE"];
-var TEENS = ["DIEZ", "ONCE", "DOCE", "TRECE", "CATORCE", "QUINCE", "DIECIS\xC9IS", "DIECISIETE", "DIECIOCHO", "DIECINUEVE"];
-var TENS = ["", "", "VEINTE", "TREINTA", "CUARENTA", "CINCUENTA", "SESENTA", "SETENTA", "OCHENTA", "NOVENTA"];
-var HUNDREDS = ["", "CIENTO", "DOSCIENTOS", "TRESCIENTOS", "CUATROCIENTOS", "QUINIENTOS", "SEISCIENTOS", "SETECIENTOS", "OCHOCIENTOS", "NOVECIENTOS"];
-function underThousand(n) {
-  if (n === 0) return "";
-  if (n === 100) return "CIEN";
-  const hundred = Math.floor(n / 100);
-  const rest = n % 100;
-  let tail = "";
-  if (rest < 10) tail = ONES[rest];
-  else if (rest < 20) tail = TEENS[rest - 10];
-  else if (rest === 20) tail = "VEINTE";
-  else if (rest < 30) tail = `VEINTI${ONES[rest - 20].toLowerCase()}`.toUpperCase();
-  else {
-    const ten = Math.floor(rest / 10);
-    tail = TENS[ten] + (rest % 10 ? ` Y ${ONES[rest % 10]}` : "");
-  }
-  return [HUNDREDS[hundred], tail].filter(Boolean).join(" ");
-}
-function apocopate(text) {
-  return text.replace(/VEINTIUNO$/, "VEINTI\xDAN").replace(/ Y UNO$/, " Y UN").replace(/ UNO$/, " UN");
-}
-function amountInWords(amount) {
-  const cents2 = Math.round(amount * 100);
-  if (!Number.isFinite(amount) || cents2 < 0 || cents2 >= 1e11) {
-    throw new Error("Importe no v\xE1lido para el comprobante tipo cheque");
-  }
-  const whole = Math.floor(cents2 / 100);
-  const millions = Math.floor(whole / 1e6);
-  const thousands = Math.floor(whole / 1e3) % 1e3;
-  const rest = whole % 1e3;
-  const parts = [
-    millions ? millions === 1 ? "UN MILL\xD3N" : `${apocopate(underThousand(millions))} MILLONES` : "",
-    thousands ? thousands === 1 ? "MIL" : `${apocopate(underThousand(thousands))} MIL` : "",
-    rest ? apocopate(underThousand(rest)) : ""
-  ].filter(Boolean);
-  return `${whole === 1 ? "UN" : parts.join(" ") || "CERO"}${millions && whole % 1e6 === 0 ? " DE" : ""} ${whole === 1 ? "D\xD3LAR" : "D\xD3LARES"} CON ${String(cents2 % 100).padStart(2, "0")}/100`;
-}
-function createCheckVoucherPdf(v) {
-  const doc = new PDFDocument2({ size: "LETTER", margin: 0 });
-  doc.info.Title = `Comprobante tipo cheque ONEFIX, n\xF3mina #${v.payrollId}`;
-  doc.info.Author = "Perplexity Computer";
-  const label = (text, x, y, width = 500) => doc.font("Helvetica-Bold").fontSize(7.6).fillColor(MUTED).text(text.toUpperCase(), x, y, { width });
-  const body = (text, x, y, width, size = 10.5) => doc.font("Helvetica").fontSize(size).fillColor(BLACK2).text(text, x, y, { width });
-  const rule = (x1, y, x2, color = "#999999") => doc.moveTo(x1, y).lineTo(x2, y).lineWidth(0.75).strokeColor(color).stroke();
-  doc.rect(36, 36, 540, 318).fillAndStroke("#FFFEFC", BLACK2);
-  doc.rect(36, 36, 540, 7).fill(ORANGE2);
-  doc.font("Helvetica-Bold").fontSize(20).fillColor(BLACK2).text("ONEFIX", 51, 55);
-  doc.fontSize(8).fillColor(ORANGE2).text("CONSTRUCTION", 52, 80);
-  doc.font("Helvetica").fontSize(7).fillColor(MUTED).text("COMPROBANTE DE PAGO \xB7 USO INTERNO", 52, 96);
-  doc.font("Helvetica-Bold").fontSize(9).fillColor(ORANGE2).text("NO NEGOCIABLE", 292, 62, { width: 149, align: "right" });
-  label("Control #", 466, 57, 96);
-  body(String(v.lineId).padStart(6, "0"), 466, 70, 96, 12);
-  label("Fecha", 399, 94, 70);
-  body(v.paidAt.slice(0, 10), 462, 92, 100, 10);
-  rule(458, 111, 562);
-  rule(51, 119, 561, "#D4D4D4");
-  label("P\xE1guese a la orden de", 52, 137, 142);
-  body(v.payee, 52, 153, 365, 13);
-  rule(52, 183, 424);
-  doc.rect(438, 139, 124, 46).fill(BLACK2);
-  doc.font("Helvetica-Bold").fontSize(13).fillColor("#FFFFFF").text(`USD ${Number(v.net).toFixed(2)}`, 445, 155, { width: 110, align: "right" });
-  label("La suma de", 52, 198, 110);
-  body(amountInWords(v.net), 52, 213, 510, 9.6);
-  rule(52, 243, 562);
-  label("Concepto", 52, 258, 76);
-  body(`N\xF3mina del ${v.weekStart} al ${v.weekEnd}`, 105, 257, 297, 9.3);
-  label("Validaci\xF3n interna", 410, 258, 152);
-  rule(410, 279, 562);
-  doc.font("Helvetica").fontSize(7).fillColor(MUTED).text("Pago registrado en ONEFIX", 410, 282, { width: 152 });
-  doc.rect(37, 307, 538, 46).fill("#FFF1E5");
-  doc.font("Helvetica-Bold").fontSize(8.5).fillColor(BLACK2).text("NO ES UN CHEQUE BANCARIO", 51, 318);
-  doc.font("Helvetica").fontSize(7.5).fillColor(MUTED).text("No se deposita ni se endosa. No acredita por s\xED solo disponibilidad de fondos.", 51, 333, { width: 510 });
-  doc.save().dash(4, { space: 4 });
-  rule(36, 378, 576, "#888888");
-  doc.restore();
-  doc.rect(36, 399, 540, 274).strokeColor("#B9B9B9").lineWidth(0.75).stroke();
-  doc.rect(36, 399, 540, 37).fill(BLACK2);
-  doc.font("Helvetica-Bold").fontSize(10).fillColor("#FFFFFF").text("TAL\xD3N DE CONTROL", 52, 412);
-  doc.fontSize(8.5).fillColor(ORANGE2).text(`N\xD3MINA #${v.payrollId}  /  PAGO #${v.lineId}`, 344, 413, { width: 216, align: "right" });
-  label("Beneficiario", 52, 452, 255);
-  body(v.payee, 52, 468, 260);
-  label("Documento", 340, 452, 216);
-  body(v.document || "No registrado", 340, 468, 216);
-  label("Per\xEDodo", 52, 505, 260);
-  body(`${v.weekStart} al ${v.weekEnd}`, 52, 521, 260, 9.5);
-  label("Importe neto", 340, 505, 216);
-  doc.font("Helvetica-Bold").fontSize(11).fillColor(BLACK2).text(`USD ${Number(v.net).toFixed(2)}`, 340, 520, { width: 216 });
-  label("Medio de pago", 52, 556, 260);
-  body(v.method || "No registrado", 52, 572, 260, 9.5);
-  label("Referencia", 340, 556, 216);
-  body(v.reference || "No registrada", 340, 572, 216, 9);
-  rule(52, 618, 560, "#D4D4D4");
-  doc.font("Helvetica-Bold").fontSize(8).fillColor(ORANGE2).text("PAGO REGISTRADO \xB7 NO NEGOCIABLE", 52, 635);
-  doc.font("Helvetica").fontSize(7).fillColor(MUTED).text("Constancia operativa. No sustituye un cheque, una orden de transferencia ni la confirmaci\xF3n bancaria.", 52, 651, { width: 508 });
-  if (v.sample) {
-    doc.font("Helvetica-Bold").fontSize(8).fillColor(MUTED).text("DATOS FICTICIOS \xB7 DOCUMENTO DE MUESTRA", 36, 696, { width: 540, align: "right" });
-  }
-  return doc;
-}
-
 // server/routes.ts
 function issue2(res, e) {
   let message = e && typeof e === "object" && "issues" in e && Array.isArray(e.issues) ? e.issues[0]?.message || "Revisa los datos del formulario" : e instanceof Error ? e.message : "No se pudo completar la operaci\xF3n";
@@ -1144,7 +1043,7 @@ function issue2(res, e) {
   res.status(["23505", "23503", "23514"].includes(code) || /UNIQUE|FOREIGN KEY|CHECK/.test(message) ? 409 : 400).json({ error: message });
 }
 async function pdf(res, name, draw) {
-  const doc = new PDFDocument3({ margin: 50, size: "LETTER", bufferPages: true });
+  const doc = new PDFDocument2({ margin: 50, size: "LETTER", bufferPages: true });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
   doc.pipe(res);
@@ -1168,7 +1067,7 @@ function line(doc, label, value2) {
 async function registerRoutes(httpServer, app) {
   registerAuth(app);
   app.use("/api", (req, res, next) => {
-    if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/(?:pdf|cheque)|deductions\/\d+\/photo)$/.test(req.path))
+    if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/pdf|deductions\/\d+\/photo)$/.test(req.path))
       return downloadAuth(req, res, next);
     return requireAuth(req, res, next);
   });
@@ -1208,6 +1107,8 @@ async function registerRoutes(httpServer, app) {
   app.post("/api/people", allow("produccion", "administracion"), async (req, res) => {
     try {
       const p = personInput.parse(req.body);
+      if (p.kind === "empleado" && !p.jobTitle)
+        throw new Error("Indica el cargo del empleado");
       if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
         throw new Error("La carga real solo admite empleados");
       if (req.currentUser.role === "produccion" && p.kind !== "empleado")
@@ -1220,7 +1121,7 @@ async function registerRoutes(httpServer, app) {
         throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
       if (await row("SELECT id FROM people WHERE lower(document)=lower(?)", p.document))
         throw new Error("Ya existe una persona con ese documento");
-      const result = await run("INSERT INTO people (name,kind,document,phone,email,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0);
+      const result = await run("INSERT INTO people (name,kind,jobTitle,document,phone,email,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0);
       await audit(req.currentUser.id, "person-create", String(result.lastInsertRowid));
       res.json({ id: result.lastInsertRowid });
     } catch (e) {
@@ -1233,6 +1134,8 @@ async function registerRoutes(httpServer, app) {
       if (!original)
         throw new Error("Persona no encontrada");
       const p = personInput.parse(req.body);
+      if (p.kind === "empleado" && !p.jobTitle)
+        throw new Error("Indica el cargo del empleado");
       if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
         throw new Error("La carga real solo admite empleados");
       if (req.currentUser.role === "produccion" && original.kind !== "empleado")
@@ -1247,7 +1150,7 @@ async function registerRoutes(httpServer, app) {
         throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
       if (await row("SELECT id FROM people WHERE lower(document)=lower(?) AND id<>?", p.document, original.id))
         throw new Error("Ya existe una persona con ese documento");
-      await run("UPDATE people SET name=?,document=?,phone=?,email=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id);
+      await run("UPDATE people SET name=?,jobTitle=?,document=?,phone=?,email=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id);
       await audit(req.currentUser.id, "person-update", String(original.id));
       res.json({ ok: true });
     } catch (e) {
@@ -1833,6 +1736,7 @@ async function registerRoutes(httpServer, app) {
     const includedTasks = await rows("SELECT t.*,pr.name AS projectName,c.number AS contractNumber FROM tasks t JOIN projects pr ON pr.id=t.projectId LEFT JOIN contracts c ON c.id=t.contractId WHERE t.payrollId=? AND t.personId=? ORDER BY t.date,t.id", l.payrollId, l.personId);
     const receipt = createReceiptPdf({
       personName: l.personName,
+      jobTitle: l.jobTitle,
       document: person.document,
       kind: l.kind,
       phone: person.phone,
@@ -1859,28 +1763,6 @@ async function registerRoutes(httpServer, app) {
     res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
     receipt.pipe(res);
     receipt.end();
-  });
-  app.get("/api/lines/:id/cheque", allow("administracion", "gerencia"), async (req, res) => {
-    const l = await row("SELECT l.*,p.weekStart,p.weekEnd,p.status FROM payroll_lines l JOIN payrolls p ON p.id=l.payrollId WHERE l.id=?", Number(req.params.id));
-    if (!l || l.status !== "aprobado" || !l.paid)
-      return res.status(404).json({ error: "Comprobante tipo cheque disponible \xFAnicamente tras registrar el pago" });
-    const person = await row("SELECT document FROM people WHERE id=?", l.personId);
-    const cheque = createCheckVoucherPdf({
-      payrollId: l.payrollId,
-      lineId: l.id,
-      payee: l.personName,
-      document: person?.document || "",
-      net: Number(l.net),
-      weekStart: l.weekStart,
-      weekEnd: l.weekEnd,
-      paidAt: l.paidAt || "",
-      method: l.method || "",
-      reference: l.reference || ""
-    });
-    res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-comprobante-tipo-cheque-${l.payrollId}-${l.id}.pdf"`);
-    cheque.pipe(res);
-    cheque.end();
   });
   app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
     const d = await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id));

@@ -12,7 +12,6 @@ import { all, dateValid, db, generatePayroll, money, payrollFull, row, rows, run
 import { registerAuth, requireAuth, downloadAuth, allow, audit } from "./auth";
 import { registerContractTracking } from "./contract-tracking";
 import { createReceiptPdf } from "./receipt-pdf";
-import { createCheckVoucherPdf } from "./check-voucher-pdf";
 function issue(res: any, e: unknown) {
     let message = e && typeof e === "object" && "issues" in e && Array.isArray((e as any).issues)
         ? (e as any).issues[0]?.message || "Revisa los datos del formulario"
@@ -55,7 +54,7 @@ function line(doc: PDFKit.PDFDocument, label: string, value: string) {
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
     registerAuth(app);
     app.use("/api", (req, res, next) => {
-        if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/(?:pdf|cheque)|deductions\/\d+\/photo)$/.test(req.path))
+        if (req.method === "GET" && /^\/(?:payrolls\/\d+\/pdf\/(?:lista|contable|proyectos)|lines\/\d+\/pdf|deductions\/\d+\/photo)$/.test(req.path))
             return downloadAuth(req, res, next);
         return requireAuth(req, res, next);
     });
@@ -105,6 +104,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     app.post("/api/people", allow("produccion", "administracion"), async (req, res) => {
         try {
             const p = personInput.parse(req.body);
+            if (p.kind === "empleado" && !p.jobTitle)
+                throw new Error("Indica el cargo del empleado");
             if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
                 throw new Error("La carga real solo admite empleados");
             if (req.currentUser!.role === "produccion" && p.kind !== "empleado")
@@ -117,7 +118,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
             if ((await row("SELECT id FROM people WHERE lower(document)=lower(?)", p.document)))
                 throw new Error("Ya existe una persona con ese documento");
-            const result = (await run("INSERT INTO people (name,kind,document,phone,email,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0));
+            const result = (await run("INSERT INTO people (name,kind,jobTitle,document,phone,email,bank,account,payType,rate,overtimeRate,active) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", p.name, p.kind, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.active ? 1 : 0));
             (await audit(req.currentUser!.id, "person-create", String(result.lastInsertRowid)));
             res.json({ id: result.lastInsertRowid });
         }
@@ -131,6 +132,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             if (!original)
                 throw new Error("Persona no encontrada");
             const p = personInput.parse(req.body);
+            if (p.kind === "empleado" && !p.jobTitle)
+                throw new Error("Indica el cargo del empleado");
             if (process.env.NODE_ENV === "production" && p.kind !== "empleado")
                 throw new Error("La carga real solo admite empleados");
             if (req.currentUser!.role === "produccion" && original.kind !== "empleado")
@@ -145,7 +148,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 throw new Error("Solo Gerencia configura las horas extra del sueldo fijo");
             if ((await row("SELECT id FROM people WHERE lower(document)=lower(?) AND id<>?", p.document, original.id)))
                 throw new Error("Ya existe una persona con ese documento");
-            (await run("UPDATE people SET name=?,document=?,phone=?,email=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id));
+            (await run("UPDATE people SET name=?,jobTitle=?,document=?,phone=?,email=?,bank=?,account=?,payType=?,rate=?,overtimeRate=?,overtimeEnabled=?,active=? WHERE id=?", p.name, p.jobTitle, p.document, p.phone, p.email, p.bank, p.account, p.payType, p.rate, p.overtimeRate, p.payType === "fijo" && original.payType === "fijo" ? original.overtimeEnabled : 0, p.active ? 1 : 0, original.id));
             (await audit(req.currentUser!.id, "person-update", String(original.id)));
             res.json({ ok: true });
         }
@@ -776,7 +779,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         const person = (await row("SELECT * FROM people WHERE id=?", l.personId));
         const includedTasks = (await rows("SELECT t.*,pr.name AS projectName,c.number AS contractNumber FROM tasks t JOIN projects pr ON pr.id=t.projectId LEFT JOIN contracts c ON c.id=t.contractId WHERE t.payrollId=? AND t.personId=? ORDER BY t.date,t.id", l.payrollId, l.personId));
         const receipt = createReceiptPdf({
-            personName: l.personName, document: person.document, kind: l.kind,
+            personName: l.personName, jobTitle: l.jobTitle, document: person.document, kind: l.kind,
             phone: person.phone, email: person.email, bank: person.bank, account: person.account,
             weekStart: l.weekStart, weekEnd: l.weekEnd, payrollId: l.payrollId,
             projects: l.projectAllocations === null ? null : JSON.parse(l.projectAllocations),
@@ -789,21 +792,6 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-recibo-${l.payrollId}-${l.id}.pdf"`);
         receipt.pipe(res);
         receipt.end();
-    });
-    app.get("/api/lines/:id/cheque", allow("administracion", "gerencia"), async (req, res) => {
-        const l = await row("SELECT l.*,p.weekStart,p.weekEnd,p.status FROM payroll_lines l JOIN payrolls p ON p.id=l.payrollId WHERE l.id=?", Number(req.params.id));
-        if (!l || l.status !== "aprobado" || !l.paid)
-            return res.status(404).json({ error: "Comprobante tipo cheque disponible únicamente tras registrar el pago" });
-        const person = await row("SELECT document FROM people WHERE id=?", l.personId);
-        const cheque = createCheckVoucherPdf({
-            payrollId: l.payrollId, lineId: l.id, payee: l.personName, document: person?.document || "",
-            net: Number(l.net), weekStart: l.weekStart, weekEnd: l.weekEnd,
-            paidAt: l.paidAt || "", method: l.method || "", reference: l.reference || "",
-        });
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `attachment; filename="ONEFIX-comprobante-tipo-cheque-${l.payrollId}-${l.id}.pdf"`);
-        cheque.pipe(res);
-        cheque.end();
     });
     app.get("/api/deductions/:id/photo", allow("administracion", "gerencia"), async (req, res) => {
         const d = (await row("SELECT photo FROM deductions WHERE id=?", Number(req.params.id)));

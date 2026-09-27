@@ -3,6 +3,7 @@ import { createReceiptPdf, type ReceiptData } from "../server/receipt-pdf";
 
 const receipt: ReceiptData = {
   personName: "Trabajador de ejemplo",
+  jobTitle: "Operario de obra",
   document: "EJEMPLO-001",
   kind: "empleado",
   phone: "(000) 000-0000",

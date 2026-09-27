@@ -3,6 +3,7 @@ import { z } from "zod";
 export const personInput = z.object({
   name: z.string().trim().min(2),
   kind: z.enum(["empleado", "subcontratista"]),
+  jobTitle: z.string().trim().max(120).default(""),
   document: z.string().trim().min(1),
   phone: z.string().trim().min(1),
   email: z.string().trim().default(""),
@@ -83,6 +84,7 @@ export type ReceiptAttendanceDay = {
 };
 export type PayrollLine = {
   id: number; payrollId: number; personId: number; personName: string; kind: string;
+  jobTitle: string;
   gross: number; deductions: number; net: number; details: string; observation: string; allocations: { deductionId: number; amount: number }[];
   projectAllocations: ProjectAllocation[] | null;
   attendanceSnapshot: ReceiptAttendanceDay[] | null;

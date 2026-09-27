@@ -197,7 +197,7 @@ export async function generatePayroll(weekStart: string) {
         const created = (await run("INSERT INTO payrolls (weekStart,weekEnd,status,submittedAt,note) VALUES (?,?,?,?,?)", weekStart, end, "borrador", new Date().toISOString(), ""));
         const id = Number(created.lastInsertRowid);
         for (const p of prepared) {
-            (await run("INSERT INTO payroll_lines (payrollId,personId,personName,kind,gross,deductions,net,details,allocations,projectAllocations,attendanceSnapshot) VALUES (?,?,?,?,?,?,?,?,?,?,?)", id, p.person.id, p.person.name, p.person.kind, p.gross, p.deductions, p.net, p.details, JSON.stringify(p.allocations), JSON.stringify(p.projectAllocations), p.attendanceSnapshot === null ? null : JSON.stringify(p.attendanceSnapshot)));
+            (await run("INSERT INTO payroll_lines (payrollId,personId,personName,kind,jobTitle,gross,deductions,net,details,allocations,projectAllocations,attendanceSnapshot) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", id, p.person.id, p.person.name, p.person.kind, p.person.jobTitle, p.gross, p.deductions, p.net, p.details, JSON.stringify(p.allocations), JSON.stringify(p.projectAllocations), p.attendanceSnapshot === null ? null : JSON.stringify(p.attendanceSnapshot)));
             for (const a of p.allocations)
                 (await run("UPDATE deductions SET applied=ROUND(applied+?,2) WHERE id=?", a.amount, a.deductionId));
         }

@@ -8,7 +8,7 @@ export type ReceiptTask = {
 };
 
 export type ReceiptData = {
-  personName: string; document: string; kind: string; phone: string; email: string;
+  personName: string; jobTitle: string; document: string; kind: string; phone: string; email: string;
   bank: string; account: string; weekStart: string; weekEnd: string; payrollId: number;
   projects: ProjectAllocation[] | null; days: ReceiptAttendanceDay[] | null;
   tasks: ReceiptTask[]; details: string; observation: string;
@@ -70,7 +70,8 @@ function layout(doc: PDFKit.PDFDocument, receipt: ReceiptData): number {
 
   for (const [leftLabel, leftValue, rightLabel, rightValue] of [
     ["Persona", receipt.personName, "Período", `${receipt.weekStart} al ${receipt.weekEnd}`],
-    ["Documento", value(receipt.document), "Tipo", value(receipt.kind)],
+    ["Cargo", value(receipt.jobTitle, "No registrado en esta nómina"), "Tipo", value(receipt.kind)],
+    ["Documento", value(receipt.document), "Nómina", `#${receipt.payrollId}`],
     ["Teléfono", value(receipt.phone), "Correo", value(receipt.email)],
     ["Banco", value(receipt.bank), "Cuenta", value(receipt.account, "No registrada")],
   ]) {
@@ -169,12 +170,15 @@ function layout(doc: PDFKit.PDFDocument, receipt: ReceiptData): number {
   paragraph(receipt.paid
     ? `PAGADO  |  Método: ${value(receipt.method)}  |  Referencia: ${value(receipt.reference)}  |  Registro: ${value(receipt.paidAt)}`
     : "APROBADO. PAGO PENDIENTE.");
-  y += 24;
-  rule(BLACK);
-  y += 7;
-  text("Administración / ONEFIX", LEFT, 246, 8, true);
-  text("Recibido por", 307, 267, 8, true);
-  y += 22;
+  y += 27;
+  doc.moveTo(LEFT, y).lineTo(280, y).lineWidth(0.8).strokeColor(BLACK).stroke();
+  doc.moveTo(307, y).lineTo(RIGHT, y).lineWidth(0.8).strokeColor(BLACK).stroke();
+  y += 8;
+  text("Firma del trabajador", LEFT, 246, 8, true);
+  text("Fecha de recepción", 307, 267, 8, true);
+  y += 12;
+  paragraph("La firma es un espacio para completar por el trabajador; este PDF no acredita que haya firmado.", GRAY, 7.5);
+  y += 5;
   rule(ORANGE);
   y += 8;
   paragraph("ONEFIX CONSTRUCTION  |  Documento operativo sin cálculo de conceptos legales.", GRAY, 7.5);
