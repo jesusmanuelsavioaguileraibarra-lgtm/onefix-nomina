@@ -1504,7 +1504,7 @@ async function registerRoutes(httpServer, app) {
       issue2(res, e);
     }
   });
-  app.post("/api/payrolls", allow("administracion"), async (req, res) => {
+  app.post("/api/payrolls", allow("administracion", "gerencia"), async (req, res) => {
     try {
       const p = await generatePayroll(String(req.body.weekStart));
       await audit(req.currentUser.id, "payroll-create", String(p.id));
