@@ -273,12 +273,12 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
   const visibleNav=nav.filter(n=>{
     if(n.key==="seguimiento"||n.key==="cobros"||n.key==="ventas")return !production;
     if(personnelIntake){
-      if(manager)return ["inicio","personas","nomina","cobros","ventas"].includes(n.key);
+      if(manager)return ["inicio","personas","produccion","nomina","cobros","ventas"].includes(n.key);
       if(production)return n.key==="produccion"||(!offline&&n.key==="personas");
       return ["inicio","personas","produccion","descuentos","nomina","cobros","ventas"].includes(n.key);
     }
     if(loadingDay)return !manager&&n.key==="personas";
-    return production?["personas","produccion"].includes(n.key):manager?["inicio","obras","nomina"].includes(n.key):true;
+    return production?["personas","produccion"].includes(n.key):manager?["inicio","obras","produccion","nomina"].includes(n.key):true;
   });
   const {data:s,isLoading,isError,refetch:retryState} = useQuery<State>({queryKey:["/api/state",user.id],retry:(failureCount,error)=>failureCount<2 && /(?:^|\s)503:/.test(String(error)),retryDelay:attempt=>Math.min(1000*2**attempt,3000),queryFn:async()=>{
     try {
@@ -484,14 +484,14 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
     } catch(e:any){setError(e.message||"No se pudo abrir el archivo");}
   }
   const pdfLink=(path:string,label:string)=> <button className="btn outline" onClick={()=>download(path)} data-testid={`link-${label.replaceAll(" ","-")}`}><ArrowDownToLine size={15}/>{label}</button>;
-  const title = nav.find(n=>n.key===tab)?.label || "Accesos";
+  const title = manager&&tab==="produccion" ? "Asistencia" : nav.find(n=>n.key===tab)?.label || "Accesos";
   return <div className="app-shell">
     <a href="#main" className="skip">Saltar al contenido</a>
     <aside className={`sidebar ${mobileMenu?"visible":""}`}>
       <button className="sidebar-close" type="button" aria-label="Cerrar menú" onClick={()=>setMobileMenu(false)}><X size={20}/></button>
       <div className="brand"><svg aria-label="ONEFIX" viewBox="0 0 40 40" width="38" height="38" fill="none"><path d="M20 3L35 12V28L20 37L5 28V12L20 3Z" stroke="currentColor" strokeWidth="2.5"/><path d="M12 20H28M20 12V28" stroke="currentColor" strokeWidth="3.5" strokeLinecap="square"/></svg><span><strong>ONEFIX</strong><small>OPERACIONES</small></span></div>
       <div className="sidebar-label">ESPACIO DE TRABAJO</div>
-      <nav aria-label="Navegación principal">{visibleNav.map(n=><button key={n.key} className={`nav-item ${tab===n.key?"selected":""}`} onClick={()=>{setTab(n.key);setMobileMenu(false);setError("");setSuccess("");}} data-testid={`nav-${n.key}`}><n.icon size={18}/>{n.label}{tab===n.key&&<span className="nav-marker"/>}</button>)}{manager&&<button className={`nav-item ${tab==="accesos"?"selected":""}`} onClick={()=>setTab("accesos" as Tab)} data-testid="nav-accesos"><Users size={18}/>Accesos</button>}</nav>
+      <nav aria-label="Navegación principal">{visibleNav.map(n=><button key={n.key} className={`nav-item ${tab===n.key?"selected":""}`} onClick={()=>{setTab(n.key);setMobileMenu(false);setError("");setSuccess("");}} data-testid={`nav-${n.key}`}><n.icon size={18}/>{manager&&n.key==="produccion"?"Asistencia":n.label}{tab===n.key&&<span className="nav-marker"/>}</button>)}{manager&&<button className={`nav-item ${tab==="accesos"?"selected":""}`} onClick={()=>setTab("accesos" as Tab)} data-testid="nav-accesos"><Users size={18}/>Accesos</button>}</nav>
       <div className="side-bottom"><div className="status-dot"/><span>{personnelIntake?"Operación real":"Versión de prueba"}<br/><small>{personnelIntake?"Nómina: Administración y Gerencia":"Datos en el servidor de vista previa"}</small></span></div>
     </aside>
     <div className="workspace">
