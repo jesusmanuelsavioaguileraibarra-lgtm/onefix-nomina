@@ -70,7 +70,8 @@ export default function ContractTracking({admin,offline}:{admin:boolean;offline:
         <label className="field"><span>Valor contratado (USD)</span><input name="value" type="number" min="0" step=".01" required defaultValue={editing?(editing.valueCents/100).toFixed(2):""}/></label>
         <label className="field"><span>Abonado / Desc. (USD)</span><input name="applied" type="number" min="0" step=".01" required defaultValue={editing?(editing.appliedCents/100).toFixed(2):"0.00"}/></label>
       </div><label className="field"><span>Trabajo</span><input name="work" required maxLength={1000} defaultValue={editing?.work||""}/></label>
-      <label className="field"><span>Observación</span><textarea name="note" rows={3} maxLength={3000} defaultValue={editing?.note||""}/></label>
+      <label className="field"><span>Observación (opcional)</span><textarea name="note" rows={3} maxLength={3000} defaultValue={editing?.note||""} placeholder="Condiciones del trabajo, materiales o datos por verificar" data-testid="input-contract-observation"/></label>
+      <p className="form-hint" data-testid="text-contract-observation-example">Ejemplo: “ONEFIX aporta materiales; el subcontratista aporta herramientas. Verificar medidas antes de autorizar trabajos adicionales”. Escribe solo lo que corresponda a este contrato; una nota no confirma pagos ni modifica el valor contratado.</p>
       <label className="check-field"><input type="checkbox" name="needsReview" defaultChecked={editing?.needsReview||false}/> Por verificar (número, persona, saldo o soporte)</label>
       {error&&<div className="feedback error" role="alert">{error}</div>}
       <div className="dialog-actions"><button type="button" className="btn outline" onClick={()=>setFormOpen(false)}>Cancelar</button><button className="btn primary" disabled={busy} type="submit">{busy?"Guardando…":"Guardar contrato"}</button></div></form>
