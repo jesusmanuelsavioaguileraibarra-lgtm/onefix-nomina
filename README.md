@@ -27,6 +27,7 @@ Primera versión de prueba para organizar empleados y subcontratistas de ONEFIX 
 
 ## Funciones incluidas
 
+- Área comercial privada para Administración y Gerencia: fichas de clientes y estimados con partidas, cantidad (hasta tres decimales), precio en centavos, total calculado, número `EST-000001` automático y PDF descargable. Los borradores admiten edición con control de revisión entre dispositivos. El estado «Aceptado» requiere referencia verificable y queda cerrado; el registro interno no equivale a firma digital. No se envía al cliente ni se crea contrato, factura o proyecto automáticamente. Sin copia local ni acceso de Producción.
 - Fichas de personas, obras, contratos con número único y ampliaciones justificadas.
 - Producción registra la asistencia diaria con proyecto o ubicación y responsable obligatorios. Una jornada exige hora de entrada y salida; calcula las horas regulares descontando descanso y horas extra indicadas y admite turnos nocturnos. Una ausencia exige proyecto o ubicación y responsable, pero no permite horarios, descanso, horas ni bono. La API rechaza campos obligatorios vacíos o compuestos solo por espacios y registra la acción del usuario de Producción en auditoría. Los registros anteriores se conservan con los campos nuevos en blanco y descanso de 0 minutos; al editarlos se exigen los campos aplicables.
 - Tareas de subcontratistas confirmadas por Producción. Una tarea ligada a contrato no puede superar el monto autorizado acumulado.

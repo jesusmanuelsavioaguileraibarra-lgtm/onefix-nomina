@@ -6,7 +6,7 @@ import express from "express";
 import { createServer } from "node:http";
 
 // server/routes.ts
-import PDFDocument2 from "pdfkit";
+import PDFDocument3 from "pdfkit";
 
 // shared/schema.ts
 import { z } from "zod";
@@ -1505,6 +1505,339 @@ function registerReceiptDelivery(app) {
   });
 }
 
+// server/sales.ts
+import { z as z4 } from "zod";
+
+// shared/estimate.ts
+function estimateLineCents(item) {
+  return Math.round(item.quantityMilli * item.unitCents / 1e3);
+}
+function estimateTotalCents(items) {
+  const total = items.reduce((sum, item) => sum + estimateLineCents(item), 0);
+  if (!Number.isSafeInteger(total) || total > 1e10)
+    throw new Error("El estimado supera el importe m\xE1ximo permitido");
+  return total;
+}
+
+// server/estimate-pdf.ts
+import PDFDocument2 from "pdfkit";
+var dollars = (cents2) => `$${(cents2 / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+var estimateNumber = (id) => `EST-${String(id).padStart(6, "0")}`;
+function createEstimatePdf(e) {
+  const doc = new PDFDocument2({ size: "LETTER", margin: 48, bufferPages: true });
+  const ink = "#171615", orange = "#B4540B", gray = "#6B6258";
+  const keep = (height) => {
+    if (doc.y + height > 715) doc.addPage();
+  };
+  doc.fillColor(orange).font("Helvetica-Bold").fontSize(19).text("ONEFIX  /  CONSTRUCTION");
+  doc.fillColor(ink).fontSize(15).text(`ESTIMADO ${estimateNumber(e.id)}`, { align: "right" });
+  doc.moveDown(0.6).font("Helvetica").fontSize(9).fillColor(gray).text(e.status === "borrador" ? "BORRADOR \xB7 NO ENVIADO" : `Estado interno: ${e.status.replace("_", " ")}`);
+  doc.text(`Emitido: ${new Date(e.created_at).toISOString().slice(0, 10)}    Vigente hasta: ${e.valid_until ? new Date(e.valid_until).toISOString().slice(0, 10) : "No indicada"}`);
+  doc.moveDown().fillColor(ink).font("Helvetica-Bold").fontSize(12).text(e.title);
+  if (e.project_name) doc.font("Helvetica").fontSize(10).text(`Proyecto: ${e.project_name}`);
+  doc.moveDown(0.6).font("Helvetica-Bold").text("CLIENTE").font("Helvetica").fontSize(10).text(e.client_name).text([e.contact, e.phone, e.email, e.address].filter(Boolean).join("  \xB7  "));
+  if (e.scope) {
+    doc.moveDown(0.5).font("Helvetica-Bold").text("Alcance");
+    doc.font("Helvetica").text(e.scope);
+  }
+  doc.moveDown();
+  for (const item of e.items) {
+    doc.font("Helvetica-Bold").fontSize(10).fillColor(ink);
+    keep(doc.heightOfString(item.description, { width: 510 }) + 35);
+    doc.text(item.description, 48, doc.y, { width: 510 });
+    const baseline = doc.y;
+    doc.font("Helvetica").fontSize(9).fillColor(gray).text(`${(item.quantityMilli / 1e3).toLocaleString("en-US")} \xD7 ${dollars(item.unitCents)} / unidad`, 48, baseline, { width: 315 });
+    doc.fillColor(ink).font("Helvetica-Bold").text(dollars(estimateLineCents(item)), 390, baseline, { width: 174, align: "right" });
+    doc.moveDown(0.4);
+  }
+  keep(100);
+  doc.moveDown(0.4).strokeColor(orange).moveTo(48, doc.y).lineTo(564, doc.y).stroke();
+  doc.moveDown(0.5).font("Helvetica-Bold").fontSize(14).fillColor(ink).text(`TOTAL ESTIMADO  ${dollars(e.total_cents)}`, 48, doc.y, { width: 516, align: "right" });
+  if (e.note) {
+    keep(85);
+    doc.moveDown().fontSize(9).text("Observaciones", 48, doc.y, { width: 516 });
+    doc.font("Helvetica").text(e.note, 48, doc.y, { width: 516 });
+  }
+  if (e.status === "aceptado") {
+    keep(70);
+    doc.moveDown().fillColor(gray).fontSize(9).text(`Referencia de aceptaci\xF3n registrada internamente: ${e.reference}`, 48, doc.y, { width: 516 });
+  }
+  keep(65);
+  doc.moveDown().fillColor(gray).font("Helvetica").fontSize(8).text("Este estimado no es un contrato ni acredita una firma digital. No incluye c\xE1lculos fiscales o conceptos legales.", 48, doc.y, { width: 516 });
+  const pages = doc.bufferedPageRange();
+  for (let index = pages.start; index < pages.start + pages.count; index++) {
+    doc.switchToPage(index);
+    doc.font("Helvetica").fontSize(8).fillColor(gray).text(`P\xE1gina ${index - pages.start + 1} de ${pages.count}`, 48, 724, { width: 516, align: "right" });
+  }
+  return doc;
+}
+
+// server/sales.ts
+var clientInput = z4.object({
+  name: z4.string().trim().min(2).max(180),
+  contact: z4.string().trim().max(160).default(""),
+  email: z4.union([z4.email(), z4.literal("")]).default(""),
+  phone: z4.string().trim().max(40).default(""),
+  address: z4.string().trim().max(300).default(""),
+  note: z4.string().trim().max(1500).default("")
+});
+var itemInput = z4.object({
+  description: z4.string().trim().min(2).max(500),
+  quantityMilli: z4.number().int().min(1).max(1e7),
+  unitCents: z4.number().int().min(0).max(1e8)
+});
+var estimateInput = z4.object({
+  clientId: z4.number().int().positive(),
+  title: z4.string().trim().min(2).max(180),
+  projectName: z4.string().trim().max(180).default(""),
+  validUntil: z4.union([z4.iso.date(), z4.literal("")]).default(""),
+  scope: z4.string().trim().max(2500).default(""),
+  note: z4.string().trim().max(1500).default(""),
+  items: z4.array(itemInput).min(1).max(60),
+  revision: z4.number().int().positive().optional()
+});
+var statusInput = z4.object({
+  status: z4.enum(["borrador", "en_revision", "aceptado", "rechazado"]),
+  revision: z4.number().int().positive(),
+  reference: z4.string().trim().max(250).default("")
+});
+var positiveId = (value2) => {
+  if (typeof value2 !== "string" || !/^[1-9]\d*$/.test(value2)) return null;
+  const id = Number(value2);
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
+};
+var snapshot = (client) => ({
+  name: client.name,
+  contact: client.contact,
+  email: client.email,
+  phone: client.phone,
+  address: client.address
+});
+function failure(res, error) {
+  if (error instanceof z4.ZodError)
+    return res.status(400).json({ error: error.issues[0]?.message || "Revisa los datos" });
+  const message = error instanceof Error ? error.message : "";
+  if (/^(El estimado supera|El cliente no existe|Cliente no encontrado|La ficha cambió|El estimado cambió|Indica una referencia)/.test(message))
+    return res.status(message.startsWith("El estimado supera") || message.startsWith("Indica") ? 400 : 409).json({ error: message });
+  console.error("Sales operation failed:", error);
+  return res.status(500).json({ error: "No se pudo completar la operaci\xF3n" });
+}
+async function ensureSalesSchema() {
+  await run(`CREATE TABLE IF NOT EXISTS sales_clients (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    contact TEXT NOT NULL DEFAULT '',
+    email TEXT NOT NULL DEFAULT '',
+    phone TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by BIGINT REFERENCES app_users(id)
+  )`);
+  await run(`CREATE TABLE IF NOT EXISTS sales_estimates (
+    id BIGSERIAL PRIMARY KEY,
+    client_id BIGINT NOT NULL REFERENCES sales_clients(id),
+    title TEXT NOT NULL,
+    project_name TEXT NOT NULL DEFAULT '',
+    valid_until DATE,
+    scope TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    items JSONB NOT NULL,
+    client_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb,
+    total_cents BIGINT NOT NULL CHECK (total_cents >= 0),
+    status TEXT NOT NULL DEFAULT 'borrador'
+      CHECK (status IN ('borrador','en_revision','aceptado','rechazado')),
+    reference TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by BIGINT REFERENCES app_users(id)
+  )`);
+  await run(`CREATE INDEX IF NOT EXISTS sales_estimates_client_idx ON sales_estimates (client_id)`);
+}
+function registerSales(app) {
+  app.get("/api/sales/clients", allow("administracion", "gerencia"), async (_req, res) => {
+    try {
+      res.json(await rows("SELECT * FROM sales_clients ORDER BY name,id"));
+    } catch (error) {
+      failure(res, error);
+    }
+  });
+  app.post("/api/sales/clients", allow("administracion", "gerencia"), async (req, res) => {
+    try {
+      const c = clientInput.parse(req.body);
+      const saved = await db.transaction(async () => {
+        const created = await row(`INSERT INTO sales_clients
+          (name,contact,email,phone,address,note,updated_by)
+          VALUES (?,?,?,?,?,?,?) RETURNING *`, c.name, c.contact, c.email, c.phone, c.address, c.note, req.currentUser.id);
+        await audit(req.currentUser.id, "sales-client-create", String(created.id));
+        return created;
+      })();
+      res.status(201).json(saved);
+    } catch (error) {
+      failure(res, error);
+    }
+  });
+  app.patch("/api/sales/clients/:id", allow("administracion", "gerencia"), async (req, res) => {
+    const id = positiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Cliente inv\xE1lido" });
+    try {
+      const c = clientInput.extend({ revision: z4.number().int().positive() }).parse(req.body);
+      const saved = await db.transaction(async () => {
+        const updated = await row(
+          `UPDATE sales_clients SET name=?,contact=?,email=?,phone=?,address=?,note=?,
+          revision=revision+1,updated_at=now(),updated_by=? WHERE id=? AND revision=? RETURNING *`,
+          c.name,
+          c.contact,
+          c.email,
+          c.phone,
+          c.address,
+          c.note,
+          req.currentUser.id,
+          id,
+          c.revision
+        );
+        if (!updated) throw new Error("La ficha cambi\xF3 en otro dispositivo. Actualiza la vista antes de editar.");
+        await audit(req.currentUser.id, "sales-client-update", String(id));
+        return updated;
+      })();
+      res.json(saved);
+    } catch (error) {
+      failure(res, error);
+    }
+  });
+  app.get("/api/sales/estimates", allow("administracion", "gerencia"), async (_req, res) => {
+    try {
+      const list = await rows(`SELECT e.*,COALESCE(e.client_snapshot->>'name',c.name) AS client_name FROM sales_estimates e
+        JOIN sales_clients c ON c.id=e.client_id ORDER BY e.id DESC`);
+      res.json(list.map((e) => ({ ...e, number: estimateNumber(e.id), valid_until: e.valid_until ? new Date(e.valid_until).toISOString().slice(0, 10) : null })));
+    } catch (error) {
+      failure(res, error);
+    }
+  });
+  app.post("/api/sales/estimates", allow("administracion", "gerencia"), async (req, res) => {
+    try {
+      const e = estimateInput.parse(req.body);
+      const totalCents = estimateTotalCents(e.items);
+      const created = await db.transaction(async () => {
+        const client = await row("SELECT * FROM sales_clients WHERE id=?", e.clientId);
+        if (!client)
+          throw new Error("El cliente no existe");
+        const saved = await row(
+          `INSERT INTO sales_estimates
+          (client_id,title,project_name,valid_until,scope,note,items,client_snapshot,total_cents,updated_by)
+          VALUES (?,?,?,?,?,?,?::jsonb,?::jsonb,?,?) RETURNING id`,
+          e.clientId,
+          e.title,
+          e.projectName,
+          e.validUntil || null,
+          e.scope,
+          e.note,
+          JSON.stringify(e.items),
+          JSON.stringify(snapshot(client)),
+          totalCents,
+          req.currentUser.id
+        );
+        await audit(req.currentUser.id, "sales-estimate-create", String(saved.id));
+        return saved;
+      })();
+      res.status(201).json({ id: created.id, number: estimateNumber(created.id) });
+    } catch (error) {
+      failure(res, error);
+    }
+  });
+  app.patch("/api/sales/estimates/:id", allow("administracion", "gerencia"), async (req, res) => {
+    const id = positiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Estimado inv\xE1lido" });
+    try {
+      const e = estimateInput.extend({ revision: z4.number().int().positive() }).parse(req.body);
+      const totalCents = estimateTotalCents(e.items);
+      const updated = await db.transaction(async () => {
+        const client = await row("SELECT * FROM sales_clients WHERE id=?", e.clientId);
+        if (!client) throw new Error("El cliente no existe");
+        const saved = await row(
+          `UPDATE sales_estimates SET client_id=?,title=?,project_name=?,valid_until=?,
+          scope=?,note=?,items=?::jsonb,client_snapshot=?::jsonb,total_cents=?,revision=revision+1,updated_at=now(),updated_by=?
+          WHERE id=? AND revision=? AND status='borrador' RETURNING id,revision`,
+          e.clientId,
+          e.title,
+          e.projectName,
+          e.validUntil || null,
+          e.scope,
+          e.note,
+          JSON.stringify(e.items),
+          JSON.stringify(snapshot(client)),
+          totalCents,
+          req.currentUser.id,
+          id,
+          e.revision
+        );
+        if (!saved) throw new Error("El estimado cambi\xF3 o ya no es borrador. Actualiza la vista antes de editar.");
+        await audit(req.currentUser.id, "sales-estimate-update", String(id));
+        return saved;
+      })();
+      res.json(updated);
+    } catch (error) {
+      failure(res, error);
+    }
+  });
+  app.patch("/api/sales/estimates/:id/status", allow("administracion", "gerencia"), async (req, res) => {
+    const id = positiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Estimado inv\xE1lido" });
+    try {
+      const change = statusInput.parse(req.body);
+      if (change.status === "aceptado" && change.reference.length < 4)
+        throw new Error("Indica una referencia verificable de aceptaci\xF3n del cliente");
+      const updated = await db.transaction(async () => {
+        const saved = await row(
+          `UPDATE sales_estimates SET status=?,reference=?,
+          revision=revision+1,updated_at=now(),updated_by=?
+          WHERE id=? AND revision=? AND status IN ('borrador','en_revision')
+          RETURNING id,revision,status`,
+          change.status,
+          change.reference,
+          req.currentUser.id,
+          id,
+          change.revision
+        );
+        if (!saved) throw new Error("El estimado cambi\xF3 o tiene una decisi\xF3n final. Actualiza la vista.");
+        await audit(req.currentUser.id, "sales-estimate-status", `${id}:${change.status}`);
+        return saved;
+      })();
+      res.json(updated);
+    } catch (error) {
+      failure(res, error);
+    }
+  });
+  app.get("/api/sales/estimates/:id/pdf", allow("administracion", "gerencia"), async (req, res) => {
+    const id = positiveId(req.params.id);
+    if (!id) return res.status(400).json({ error: "Estimado inv\xE1lido" });
+    try {
+      const e = await row(`SELECT e.*,c.name AS client_name,c.contact,c.email,c.phone,c.address
+        FROM sales_estimates e JOIN sales_clients c ON c.id=e.client_id WHERE e.id=?`, id);
+      if (!e) return res.status(404).json({ error: "Estimado no encontrado" });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${estimateNumber(id)}.pdf"`);
+      const original = e.client_snapshot || {};
+      const doc = createEstimatePdf({
+        ...e,
+        client_name: original.name || e.client_name,
+        contact: original.contact ?? e.contact,
+        phone: original.phone ?? e.phone,
+        email: original.email ?? e.email,
+        address: original.address ?? e.address
+      });
+      doc.pipe(res);
+      doc.end();
+    } catch (error) {
+      if (!res.headersSent) failure(res, error);
+      else res.destroy(error);
+    }
+  });
+}
+
 // server/routes.ts
 function issue2(res, e) {
   let message = e && typeof e === "object" && "issues" in e && Array.isArray(e.issues) ? e.issues[0]?.message || "Revisa los datos del formulario" : e instanceof Error ? e.message : "No se pudo completar la operaci\xF3n";
@@ -1522,7 +1855,7 @@ function issue2(res, e) {
   res.status(["23505", "23503", "23514"].includes(code) || /UNIQUE|FOREIGN KEY|CHECK/.test(message) ? 409 : 400).json({ error: message });
 }
 async function pdf(res, name, draw) {
-  const doc = new PDFDocument2({ margin: 50, size: "LETTER", bufferPages: true });
+  const doc = new PDFDocument3({ margin: 50, size: "LETTER", bufferPages: true });
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader("Content-Disposition", `attachment; filename="${name}"`);
   doc.pipe(res);
@@ -1551,10 +1884,10 @@ async function registerRoutes(httpServer, app) {
     return requireAuth(req, res, next);
   });
   app.use("/api", (req, res, next) => {
-    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path) && req.currentUser.role !== "produccion") && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "Esta operaci\xF3n no est\xE1 habilitada. N\xF3mina y pagos solo se gestionan por Administraci\xF3n y Gerencia, seg\xFAn su etapa de aprobaci\xF3n." });
     }
-    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path) && req.currentUser.role !== "produccion") && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
       return res.status(423).json({ error: "La n\xF3mina y los pagos siguen bloqueados." });
     }
     next();
@@ -1562,6 +1895,7 @@ async function registerRoutes(httpServer, app) {
   registerContractTracking(app);
   registerReceivables(app);
   registerReceiptDelivery(app);
+  registerSales(app);
   app.get("/api/state", async (req, res) => {
     const production = req.currentUser.role === "produccion";
     const realProduction = production && process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1";
@@ -2036,8 +2370,8 @@ async function registerRoutes(httpServer, app) {
       if (!p || p.status === "aprobado")
         throw new Error("Una n\xF3mina aprobada no puede retirarse");
       await db.transaction(async () => {
-        const snapshot = await payrollFull(p);
-        await run("INSERT INTO payroll_revisions (originalId,weekStart,snapshot,withdrawnBy,withdrawnAt) VALUES (?,?,?,?,?)", p.id, p.weekStart, JSON.stringify(snapshot), req.currentUser.id, (/* @__PURE__ */ new Date()).toISOString());
+        const snapshot2 = await payrollFull(p);
+        await run("INSERT INTO payroll_revisions (originalId,weekStart,snapshot,withdrawnBy,withdrawnAt) VALUES (?,?,?,?,?)", p.id, p.weekStart, JSON.stringify(snapshot2), req.currentUser.id, (/* @__PURE__ */ new Date()).toISOString());
         for (const l of await rows("SELECT * FROM payroll_lines WHERE payrollId=?", p.id))
           for (const a of JSON.parse(l.allocations))
             await run("UPDATE deductions SET applied=ROUND(applied-?,2) WHERE id=?", a.amount, a.deductionId);
@@ -2257,6 +2591,7 @@ async function createApp() {
   await ensureContractTrackingSchema();
   await ensureReceivablesSchema();
   await ensureReceiptDeliverySchema();
+  await ensureSalesSchema();
   const app = express();
   const httpServer = createServer(app);
   app.use(express.json({

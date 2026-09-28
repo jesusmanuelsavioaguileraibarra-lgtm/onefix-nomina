@@ -14,6 +14,7 @@ import { registerContractTracking } from "./contract-tracking";
 import { registerReceivables } from "./receivables";
 import { operationalPayrollWrite } from "./operational-access";
 import { dispatchReceipt, enqueueReceipt, receiptForLine, registerReceiptDelivery } from "./receipt-delivery";
+import { registerSales } from "./sales";
 function issue(res: any, e: unknown) {
     let message = e && typeof e === "object" && "issues" in e && Array.isArray((e as any).issues)
         ? (e as any).issues[0]?.message || "Revisa los datos del formulario"
@@ -68,6 +69,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path))
             && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
             && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path))
+            && !((req.method === "POST" || req.method === "PATCH")
+              && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path)
+              && req.currentUser!.role !== "produccion")
             && !operationalPayrollWrite(req.method, req.path, req.currentUser!.role)
             && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
@@ -77,6 +81,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST")
             && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path))
             && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path))
+            && !((req.method === "POST" || req.method === "PATCH")
+              && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path)
+              && req.currentUser!.role !== "produccion")
             && !operationalPayrollWrite(req.method, req.path, req.currentUser!.role)
             && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path))
             && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
@@ -87,6 +94,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     registerContractTracking(app);
     registerReceivables(app);
     registerReceiptDelivery(app);
+    registerSales(app);
     app.get("/api/state", async (req, res) => {
         const production = req.currentUser!.role === "produccion";
         const realProduction = production && process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1";
