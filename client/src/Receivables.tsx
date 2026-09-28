@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "./lib/queryClient";
+import { dueStatus } from "./lib/receivable-alerts";
 
 type Invoice = {
   id:number;source_row:number;job:string;invoice_number:string;issue_date:string|null;
@@ -10,16 +11,6 @@ type Invoice = {
 };
 const usd=(cents:number|null)=>cents===null?"No indicado":
   new Intl.NumberFormat("en-US",{style:"currency",currency:"USD"}).format(cents/100);
-function status(item:Invoice,today:string) {
-  if(item.cancelled)return "Cancelada";
-  if(!item.invoice_number.startsWith("INV"))return "Sin factura emitida";
-  if(!item.due_date)return "Sin vencimiento";
-  const balance=(item.balance_2025_cents||0)+(item.balance_2026_cents||0);
-  if(balance<=0)return "Sin saldo positivo";
-  if(item.due_date<today)return "Vencida";
-  if(item.due_date<=new Date(Date.parse(`${today}T12:00:00Z`)+7*86400000).toISOString().slice(0,10))return "Próxima";
-  return "Vigente";
-}
 
 export default function Receivables({offline}:{offline:boolean}) {
   const {data:items=[],isLoading,isError,refetch}=useQuery<Invoice[]>({
@@ -39,7 +30,7 @@ export default function Receivables({offline}:{offline:boolean}) {
     return [i.invoice_number,i.job,i.client,i.note].some(value=>value.toLocaleLowerCase("es").includes(needle))
       && (filter==="todas"||filter==="revisar"&&!!i.review_reasons
         ||filter==="canceladas"&&i.cancelled||filter==="sin-fecha"&&!i.due_date&&!i.cancelled
-        ||filter==="vencidas"&&status(i,today)==="Vencida");
+        ||filter==="vencidas"&&dueStatus(i,today)==="Vencida");
   }),[items,search,filter,today]);
   const pageSize=25;
   const pageCount=Math.ceil(visible.length/pageSize);
@@ -83,7 +74,7 @@ export default function Receivables({offline}:{offline:boolean}) {
             <span className="receivable-id"><b>{i.invoice_number||"Sin número"}</b><small>Fila {i.source_row} del Excel</small></span>
             <span className="receivable-party"><b>{i.client||"Cliente no indicado"}</b><small>Job: {i.job||"Sin job"}</small></span>
             <span className="receivable-amount"><small>Saldo 2025 + 2026</small><b>{i.balance_2025_cents===null&&i.balance_2026_cents===null?"No indicado":usd((i.balance_2025_cents||0)+(i.balance_2026_cents||0))}</b></span>
-            <span className="receivable-state"><b>{status(i,today)}</b><small>{i.due_date?`Vence: ${i.due_date}`:i.review_reasons?"Por verificar":"Vencimiento sin definir"}</small></span>
+            <span className="receivable-state"><b>{dueStatus(i,today)}</b><small>{i.due_date?`Vence: ${i.due_date}`:i.review_reasons?"Por verificar":"Vencimiento sin definir"}</small></span>
             <span className="receivable-cue" aria-hidden="true">⌄</span>
           </summary>
           <div className="receivable-detail">

@@ -9,6 +9,7 @@ import { calculateAttendanceHours } from "@shared/attendanceHours";
 import { weeklyEffectiveHours } from "@shared/weeklyHours";
 import { initialLoadOnly } from "@shared/activation";
 import { contractLedger } from "./lib/contract-ledger";
+import { summarizeDueInvoices, type DueInvoice } from "./lib/receivable-alerts";
 import ContractTracking from "./ContractTracking";
 import Receivables from "./Receivables";
 import Sales from "./Sales";
@@ -259,15 +260,22 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
   const syncingAttendance=useRef(false);
   const [attendanceVersions,setAttendanceVersions]=useState<Record<string,number>>({});
   const production=user.role==="produccion",admin=user.role==="administracion",manager=user.role==="gerencia";
+  const dueQuery=useQuery<DueInvoice[]>({
+    queryKey:["receivables"],
+    queryFn:async()=>await (await apiRequest("GET","/api/receivables")).json(),
+    enabled:!production&&tab==="inicio"&&!offline,
+    staleTime:0,refetchOnMount:"always",refetchOnWindowFocus:true,
+  });
+  const dueSummary=dueQuery.data?summarizeDueInvoices(dueQuery.data,day()):null;
   const {data:users=[]}=useQuery<AccessUser[]>({queryKey:["/api/auth/users"],enabled:manager});
   const {data:receiptDeliveries=[]}=useQuery<ReceiptDelivery[]>({queryKey:["/api/receipt-deliveries"],enabled:!production&&!offline,staleTime:0,queryFn:async()=>await (await apiRequest("GET","/api/receipt-deliveries")).json()});
   const deliveryByLine=new Map(receiptDeliveries.map(d=>[d.lineId,d]));
   const visibleNav=nav.filter(n=>{
     if(n.key==="seguimiento"||n.key==="cobros"||n.key==="ventas")return !production;
     if(personnelIntake){
-      if(manager)return ["personas","nomina"].includes(n.key);
+      if(manager)return ["inicio","personas","nomina","cobros","ventas"].includes(n.key);
       if(production)return n.key==="produccion"||(!offline&&n.key==="personas");
-      return ["personas","produccion","descuentos","nomina"].includes(n.key);
+      return ["inicio","personas","produccion","descuentos","nomina","cobros","ventas"].includes(n.key);
     }
     if(loadingDay)return !manager&&n.key==="personas";
     return production?["personas","produccion"].includes(n.key):manager?["inicio","obras","nomina"].includes(n.key):true;
@@ -515,6 +523,26 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
           <form className="access-form" onSubmit={async e=>{e.preventDefault();setError("");setInviteResult("");const f=new FormData(e.currentTarget);try{const r=await (await apiRequest("POST","/api/auth/invite",{username:f.get("username"),role:f.get("role")})).json();setInviteResult(`${location.origin}${location.pathname}?invite=${encodeURIComponent(r.inviteToken)}`);}catch(err:any){setError(err.message);}}}><Field label="Usuario" name="username" required minLength={3} maxLength={32} placeholder="administracion"/><Field label="Rol" name="role" required><option value="produccion">Producción</option><option value="administracion">Administración</option><option value="gerencia">Gerencia</option></Field><button className="btn primary" type="submit" data-testid="button-invite">Crear invitación o reactivar</button></form>{inviteResult&&<div className="feedback success"><p>Comparte el enlace privado solo con la persona invitada. Para reactivar una cuenta, conserva el mismo usuario y rol:</p><input aria-label="Enlace de invitación" readOnly value={inviteResult} onFocus={e=>e.target.select()} data-testid="input-invite-link"/><button className="btn outline" onClick={()=>navigator.clipboard?.writeText(inviteResult)}>Copiar enlace</button></div>}</section>}
         {s && tab==="inicio" && <>
           <section className="metric-grid" aria-label="Indicadores"><article className="metric featured"><span>Neto de la última nómina</span><strong data-testid="text-net">{usd(weeklyNet)}</strong><small>{activePayroll ? `${activePayroll.weekStart} a ${activePayroll.weekEnd}`:"Sin nóminas generadas"}</small></article><article className="metric"><span>Bruto calculado</span><strong>{usd(weeklyGross)}</strong><small>Empleados y tareas aprobadas</small></article><article className="metric"><span>Tareas por aprobar</span><strong>{pending.toString().padStart(2,"0")}</strong><small>Producción pendiente</small></article><article className="metric"><span>Descuentos por recuperar</span><strong>{usd(outstanding)}</strong><small>Anticipos, préstamos y daños</small></article></section>
+          {!production&&<section className="panel due-alerts" aria-label="Avisos de vencimiento" data-testid="due-alerts">
+            <div className="panel-head"><div><h2>Avisos de vencimiento</h2><p>Facturas por cobrar · próximos 7 días · hora de Florida</p></div><button type="button" className="text-link" onClick={()=>setTab("cobros")} data-testid="button-open-receivables">Ver cobros <ArrowRight size={15}/></button></div>
+            {offline?<p className="due-alert-message" role="status">Conéctate para consultar vencimientos actualizados. No se muestran saldos guardados en este dispositivo.</p>
+            :dueQuery.isPending||dueQuery.isFetching&&!dueQuery.data?<p className="due-alert-message" role="status">Consultando vencimientos…</p>
+            :dueQuery.isError?<div className="due-alert-message" role="alert">No se pudieron consultar los vencimientos. <button type="button" className="text-link" onClick={()=>dueQuery.refetch()} data-testid="button-retry-due-alerts">Reintentar</button></div>
+            :dueSummary&&<>
+              <div className="due-alert-stats">
+                <div><span>Vencidas</span><strong data-testid="text-overdue-count">{dueSummary.overdue.length}</strong><small>Saldo informado: {usd(dueSummary.overdueCents/100)}</small></div>
+                <div><span>Hoy y próximos 7 días</span><strong data-testid="text-upcoming-count">{dueSummary.upcoming.length}</strong><small>Saldo informado: {usd(dueSummary.upcomingCents/100)}</small></div>
+                <div><span>Sin fecha</span><strong data-testid="text-undated-count">{dueSummary.undated.length}</strong><small>Completar vencimiento</small></div>
+                <div><span>Por verificar</span><strong data-testid="text-due-review-count">{dueSummary.review.length}</strong><small>Saldo o datos no conciliados</small></div>
+              </div>
+              {dueSummary.overdue.length+dueSummary.upcoming.length>0?<div className="due-alert-list">{[...dueSummary.overdue,...dueSummary.upcoming].slice(0,5).map(i=><div className="due-alert-row" key={i.id}>
+                <span className="due-alert-label">{i.due_date!<day()?"Vencida":"Próxima"}</span>
+                <div><b>{i.invoice_number}</b><small>{i.client||i.job||"Cliente sin indicar"} · vence {i.due_date}</small></div>
+                <strong>{usd(((i.balance_2025_cents||0)+(i.balance_2026_cents||0))/100)}</strong>
+              </div>)}</div>:<p className="due-alert-message">No hay facturas con vencimiento confirmado en este plazo.</p>}
+              <p className="due-alert-footnote">Los saldos provienen del registro de cobros; no equivalen a importes conciliados. Las facturas canceladas, sin emitir o marcadas para revisión no se suman a estos importes.</p>
+            </>}
+          </section>}
           <div className="overview-grid"><section className="panel"><div className="panel-head"><div><h2>Últimas nóminas</h2><p>Revisión y desembolsos</p></div><button className="text-link" onClick={()=>setTab("nomina")}>Ver todas <ArrowRight size={15}/></button></div>{payrolls.length?<div className="row-list">{payrolls.slice(0,5).map(p=><div className="list-row" key={p.id}><div className="list-icon"><CalendarDays size={18}/></div><div className="row-main"><b>Semana {p.weekStart}</b><small>{p.lines.length} personas · termina {p.weekEnd}</small></div><Badge value={p.status}/><strong>{usd(p.lines.reduce((v,l)=>v+l.net,0))}</strong></div>)}</div>:<Empty title="Todavía no hay nóminas" description="Carga personas, asistencia o tareas y genera tu primera semana." action="Ir a producción" onClick={()=>setTab("produccion")}/>}</section>
           <section className="panel next-panel"><div className="panel-head"><div><h2>Siguiente paso</h2><p>Secuencia de trabajo</p></div></div><div className="step"><span>01</span><div><b>Prepara el equipo</b><p>Registra personas y obras desde cero.</p></div><Check size={16}/></div><div className="step"><span>02</span><div><b>Carga la producción</b><p>Asistencia diaria y tareas aprobadas.</p></div><Check size={16}/></div><div className="step"><span>03</span><div><b>Revisa y aprueba</b><p>Administración revisa; Gerencia aprueba.</p></div><Check size={16}/></div><button className="btn outline wide" onClick={()=>setTab("nomina")}>Abrir nómina semanal <ArrowRight size={16}/></button></section></div>
         </>}
