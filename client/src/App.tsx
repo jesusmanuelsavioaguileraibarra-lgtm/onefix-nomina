@@ -6,6 +6,7 @@ import { Activity, ArrowDownToLine, ArrowRight, BriefcaseBusiness, CalendarDays,
 import type { Payroll } from "@shared/schema";
 import { latestReadySaturday, payrollPeriod } from "@shared/payrollPeriod";
 import { calculateAttendanceHours } from "@shared/attendanceHours";
+import { distributeProjectHours } from "@shared/projectHours";
 import { weeklyEffectiveHours } from "@shared/weeklyHours";
 import { initialLoadOnly } from "@shared/activation";
 import { contractLedger } from "./lib/contract-ledger";
@@ -56,7 +57,7 @@ function Field({label,name,type="text",required=false,disabled=false,placeholder
 function AttendanceFields({a,people,projects,onValidationError,onValidationInput}:{a:any;people:any[];projects:any[];onValidationError:(message:string)=>void;onValidationInput:()=>void}) {
   const previousSplits=Array.isArray(a?.allocations)?a.allocations:[];
   const [project,setProject]=useState(a?.projectName || "");
-  const [splits,setSplits]=useState<{projectName:string;regularHours:string;overtimeHours:string}[]>(previousSplits.slice(1).map((p:any)=>({projectName:p.projectName,regularHours:String(p.regularHours),overtimeHours:String(p.overtimeHours)})));
+  const [splits,setSplits]=useState<{projectName:string;hours:string}[]>(previousSplits.slice(1).map((p:any)=>({projectName:p.projectName,hours:String(Number((p.regularHours+p.overtimeHours).toFixed(6)))})));
   const [timeIn,setTimeIn]=useState(a?.timeIn || "");
   const [timeOut,setTimeOut]=useState(a?.timeOut || "");
   const [breakMinutes,setBreakMinutes]=useState(String(a?.breakMinutes ?? 0));
@@ -71,8 +72,21 @@ function AttendanceFields({a,people,projects,onValidationError,onValidationInput
       regular=result.regular;worked=result.worked;
     } catch(e) { calculationError=(e as Error).message; }
   }
-  const primaryRegular=(regular ?? 0)-splits.reduce((sum,p)=>sum+(Number(p.regularHours)||0),0);
-  const primaryOvertime=Number(overtime)-splits.reduce((sum,p)=>sum+(Number(p.overtimeHours)||0),0);
+  let distribution:ReturnType<typeof distributeProjectHours>|null=null, distributionError="";
+  if (worked !== null && !absent) {
+    try {
+      distribution=distributeProjectHours(worked,Number(overtime),project,splits.map(p=>({projectName:p.projectName,hours:p.hours.trim()===""?NaN:Number(p.hours)})));
+      // Editing an unrelated field must not reallocate an existing record's
+      // project overtime if its original times and distribution are unchanged.
+      const unchanged=previousSplits.length>0 && a?.timeIn===timeIn && a?.timeOut===timeOut
+        && a?.breakMinutes===Number(breakMinutes) && a?.overtime===Number(overtime)
+        && a?.projectName===project && previousSplits.length===splits.length+1
+        && splits.every((p,i)=>p.projectName===previousSplits[i+1].projectName
+          && Math.abs(Number(p.hours)-previousSplits[i+1].regularHours-previousSplits[i+1].overtimeHours)<.000001);
+      if (unchanged) distribution={primaryHours:worked-splits.reduce((sum,p)=>sum+Number(p.hours),0),allocations:previousSplits};
+    } catch(e) { distributionError=(e as Error).message; }
+  }
+  const primaryAllocation=distribution?.allocations[0];
   const showRequired=(e:React.InvalidEvent<HTMLInputElement>,message:string) => {
     if (e.currentTarget.form?.querySelector(":invalid")===e.currentTarget) onValidationError(message);
   };
@@ -94,11 +108,11 @@ function AttendanceFields({a,people,projects,onValidationError,onValidationInput
     <Field label="Bono USD" name="bonus" type="number" min="0" step=".01" required value={bonus} onChange={(e:React.ChangeEvent<HTMLInputElement>)=>setBonus(e.target.value)} readOnly={absent}/>
   </div>
   {!absent && <section className="attendance-allocation" aria-label="Distribución por proyectos">
-    <div className="allocation-head"><div><strong>Distribuir jornada entre proyectos</strong><small>El proyecto principal recibe el remanente: {Math.max(0,primaryRegular).toFixed(2)} h regulares y {Math.max(0,primaryOvertime).toFixed(2)} h extra.</small></div><button type="button" className="btn outline" onClick={()=>setSplits(v=>[...v,{projectName:"",regularHours:"",overtimeHours:""}])} disabled={splits.length>=11} data-testid="button-add-project-split"><Plus size={15}/> Otro proyecto</button></div>
-    {splits.map((split,i)=><div className="allocation-row" key={i}><label className="field"><span>Otro proyecto {i+1}</span><input required list="attendance-projects" maxLength={160} value={split.projectName} onChange={e=>setSplits(v=>v.map((x,j)=>j===i?{...x,projectName:e.target.value}:x))} data-testid={`input-split-project-${i}`}/></label><label className="field"><span>Horas regulares</span><input required type="number" min="0" max="24" step="any" value={split.regularHours} onChange={e=>setSplits(v=>v.map((x,j)=>j===i?{...x,regularHours:e.target.value}:x))} data-testid={`input-split-regular-${i}`}/></label><label className="field"><span>Horas extra</span><input required type="number" min="0" max="24" step="any" value={split.overtimeHours} onChange={e=>setSplits(v=>v.map((x,j)=>j===i?{...x,overtimeHours:e.target.value}:x))} data-testid={`input-split-extra-${i}`}/></label><button type="button" className="table-action" onClick={()=>setSplits(v=>v.filter((_,j)=>j!==i))} data-testid={`button-remove-split-${i}`}>Quitar</button></div>)}
-    {(primaryRegular<-.0001||primaryOvertime<-.0001)&&<p className="feedback error" role="alert">Las horas repartidas exceden las horas efectivas de la jornada.</p>}
-    <input type="hidden" name="allocations" value={JSON.stringify([{projectName:project,regularHours:Math.max(0,primaryRegular),overtimeHours:Math.max(0,primaryOvertime)},...splits.map(p=>({projectName:p.projectName,regularHours:Number(p.regularHours),overtimeHours:Number(p.overtimeHours)}))])}/>
-    <small>Si no agregas otra obra, toda la jornada queda en la principal. El bono se atribuye al proyecto principal.</small>
+    <div className="allocation-head"><div><strong>Distribuir horas efectivas entre proyectos</strong><small>Jornada: {worked===null?"Indica entrada y salida":`${Number(worked.toFixed(2))} h efectivas`}. Proyecto principal: {primaryAllocation?`${Number(distribution!.primaryHours.toFixed(2))} h (${Number(primaryAllocation.regularHours.toFixed(2))} regulares + ${Number(primaryAllocation.overtimeHours.toFixed(2))} extra)`:"pendiente de completar el reparto"}.</small></div><button type="button" className="btn outline" onClick={()=>{setSplits(v=>[...v,{projectName:"",hours:""}]);onValidationInput();}} disabled={splits.length>=11} data-testid="button-add-project-split"><Plus size={15}/> Otro proyecto</button></div>
+    {splits.map((split,i)=><div className="allocation-row" key={i}><label className="field"><span>Otro proyecto {i+1}</span><input required list="attendance-projects" maxLength={160} value={split.projectName} onChange={e=>{setSplits(v=>v.map((x,j)=>j===i?{...x,projectName:e.target.value}:x));onValidationInput();}} data-testid={`input-split-project-${i}`}/></label><label className="field"><span>Horas efectivas en este proyecto</span><input required type="number" min=".01" max="24" step="any" value={split.hours} onChange={e=>{setSplits(v=>v.map((x,j)=>j===i?{...x,hours:e.target.value}:x));onValidationInput();}} data-testid={`input-split-hours-${i}`}/><small>{distribution?.allocations[i+1]?`${Number(distribution.allocations[i+1].regularHours.toFixed(2))} h regulares + ${Number(distribution.allocations[i+1].overtimeHours.toFixed(2))} h extra`:"Escribe las horas trabajadas"}</small></label><button type="button" className="table-action" onClick={()=>{setSplits(v=>v.filter((_,j)=>j!==i));onValidationInput();}} data-testid={`button-remove-split-${i}`}>Quitar</button></div>)}
+    {distributionError&&<p className="feedback error" role="alert" data-testid="error-project-hours">{distributionError}</p>}
+    <input type="hidden" name="allocations" value={JSON.stringify(distribution?.allocations??[])}/>
+    <small>Escribe horas decimales (1.5 h = 1 h 30 min). La obra principal recibe el resto. Las horas extra se distribuyen proporcionalmente entre las obras; el descanso se descuenta una sola vez y el bono queda en la principal.</small>
   </section>}
   {calculationError && !absent && <p className="feedback error" role="alert">{calculationError}</p>}
   <label className="check-field"><input name="absent" type="checkbox" checked={absent} onChange={e=>{const marked=e.target.checked;setAbsent(marked);if(marked){setTimeIn("");setTimeOut("");setBreakMinutes("0");setOvertime("0");setBonus("0");}onValidationInput();}}/> Marcar ausencia (sin horas ni bono)</label>
@@ -456,8 +470,15 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
         return;
       }
       const allocations=absent?[]:JSON.parse(String(f.get("allocations")||"[]"));
-      if (!absent && allocations.some((p:any)=>!p.projectName?.trim() || !Number.isFinite(p.regularHours) || !Number.isFinite(p.overtimeHours) || p.regularHours<-.0001 || p.overtimeHours<-.0001 || p.regularHours+p.overtimeHours<=0)) {
-        setError("Cada proyecto debe tener nombre y horas válidas. No repartas más horas que las trabajadas.");
+      let expectedRegular=0;
+      if(!absent){
+        try {expectedRegular=calculateAttendanceHours(timeIn,timeOut,number(f.get("breakMinutes")),number(f.get("overtime"))).regular;}
+        catch(e){setError((e as Error).message);return;}
+      }
+      if (!absent && (!allocations.length || allocations.some((p:any)=>!p.projectName?.trim() || !Number.isFinite(p.regularHours) || !Number.isFinite(p.overtimeHours) || p.regularHours<-.0001 || p.overtimeHours<-.0001 || p.regularHours+p.overtimeHours<=0)
+        || Math.abs(allocations.reduce((sum:number,p:any)=>sum+p.regularHours,0)-expectedRegular)>0.0001
+        || Math.abs(allocations.reduce((sum:number,p:any)=>sum+p.overtimeHours,0)-number(f.get("overtime")))>0.0001)) {
+        setError("Revisa las horas por proyecto: deben sumar exactamente las horas efectivas de la jornada, sin repetir obras.");
         return;
       }
       const personId=id(f.get("personId")), date=String(f.get("date") || "");
