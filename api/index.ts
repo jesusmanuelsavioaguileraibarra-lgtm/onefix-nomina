@@ -689,7 +689,7 @@ async function requireAuth(req, res, next) {
 }
 function allow(...roles) {
   return (req, res, next) => {
-    if (!req.currentUser || !roles.includes(req.currentUser.role))
+    if (!req.currentUser || !(roles.includes(req.currentUser.role) || req.currentUser.role === "gerencia" && (roles.includes("administracion") || roles.includes("produccion"))))
       return issue(res, "Tu rol no permite esta acci\xF3n", 403);
     next();
   };
@@ -1075,7 +1075,13 @@ function registerReceivables(app) {
 
 // server/operational-access.ts
 function operationalPayrollWrite(method, path, role) {
-  if (method !== "POST" || role === "produccion") return false;
+  if (method === "DELETE" && role !== "administracion" && /^\/daily-pay\/\d+$/.test(path)) return true;
+  if (method !== "POST") return false;
+  if (role !== "produccion" && /^\/(?:projects|contracts|contracts\/\d+\/amend|lines\/\d+\/pay)$/.test(path))
+    return true;
+  if (role !== "administracion" && /^\/(?:tasks|tasks\/\d+\/approve|daily-pay)$/.test(path))
+    return true;
+  if (role === "produccion") return false;
   return /^\/payrolls$/.test(path) || /^\/payrolls\/absence-adjustment$/.test(path) || /^\/payrolls\/\d+(?:\/lines\/\d+\/(?:review|observation)|\/(?:review|approve|withdraw))$/.test(path) || /^\/people\/\d+\/fixed-overtime$/.test(path) || /^\/daily-pay\/\d+\/confirm$/.test(path) || /^\/deductions$/.test(path) || /^\/sync\/payments$/.test(path);
 }
 
@@ -1906,7 +1912,7 @@ async function registerRoutes(httpServer, app) {
       contracts: realProduction ? [] : production ? (await all("contracts")).map((c) => ({ id: c.id, number: c.number, personId: c.personId, projectId: c.projectId, authorizedAmount: c.authorizedAmount })) : await all("contracts"),
       tasks: realProduction ? [] : (await all("tasks")).map((t) => ({ ...t, approved: !!t.approved })),
       attendance: (await all("attendance")).map((a) => ({ ...a, absent: !!a.absent, allocations: a.allocations ? JSON.parse(a.allocations) : null })),
-      attendanceConflicts: req.currentUser.role === "administracion" ? (await rows(`SELECT c.*,p.name AS personName,a.projectName AS currentProject,a.timeIn AS currentTimeIn,a.timeOut AS currentTimeOut,a.responsible AS currentResponsible,
+      attendanceConflicts: req.currentUser.role !== "produccion" ? (await rows(`SELECT c.*,p.name AS personName,a.projectName AS currentProject,a.timeIn AS currentTimeIn,a.timeOut AS currentTimeOut,a.responsible AS currentResponsible,
             a.breakMinutes AS currentBreakMinutes,a.hours AS currentHours,a.overtime AS currentOvertime,a.bonus AS currentBonus,a.absent AS currentAbsent,
             a.allocations AS currentAllocations,a.note AS currentNote
           FROM attendance_conflicts c JOIN people p ON p.id=c.personId

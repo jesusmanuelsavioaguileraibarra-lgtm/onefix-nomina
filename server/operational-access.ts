@@ -1,9 +1,16 @@
 import type { Role } from "./auth";
 
-// Explicit production write allowlist. Route handlers apply the narrower
-// Administration/Gerencia permission and payroll-state checks afterwards.
+// Explicit production write allowlist. Route handlers enforce the narrower
+// role permissions and payroll-state checks afterwards.
 export function operationalPayrollWrite(method: string, path: string, role: Role): boolean {
-  if (method !== "POST" || role === "produccion") return false;
+  if (method === "DELETE" && role !== "administracion"
+    && /^\/daily-pay\/\d+$/.test(path)) return true;
+  if (method !== "POST") return false;
+  if (role !== "produccion" && /^\/(?:projects|contracts|contracts\/\d+\/amend|lines\/\d+\/pay)$/.test(path))
+    return true;
+  if (role !== "administracion" && /^\/(?:tasks|tasks\/\d+\/approve|daily-pay)$/.test(path))
+    return true;
+  if (role === "produccion") return false;
   return /^\/payrolls$/.test(path)
     || /^\/payrolls\/absence-adjustment$/.test(path)
     || /^\/payrolls\/\d+(?:\/lines\/\d+\/(?:review|observation)|\/(?:review|approve|withdraw))$/.test(path)

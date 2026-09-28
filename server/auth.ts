@@ -104,7 +104,11 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 }
 export function allow(...roles: Role[]) {
     return (req: Request, res: Response, next: NextFunction) => {
-        if (!req.currentUser || !roles.includes(req.currentUser.role))
+        // Gerencia inherits the operational permissions of both other areas.
+        // Production and Administration remain limited to their own roles.
+        if (!req.currentUser || !(roles.includes(req.currentUser.role)
+            || (req.currentUser.role === "gerencia"
+                && (roles.includes("administracion") || roles.includes("produccion")))))
             return issue(res, "Tu rol no permite esta acción", 403);
         next();
     };

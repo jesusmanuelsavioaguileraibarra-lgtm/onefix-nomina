@@ -105,7 +105,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             contracts: realProduction ? [] : production ? (await all("contracts")).map(c => ({ id: c.id, number: c.number, personId: c.personId, projectId: c.projectId, authorizedAmount: c.authorizedAmount })) : (await all("contracts")),
             tasks: realProduction ? [] : (await all("tasks")).map(t => ({ ...t, approved: !!t.approved })),
             attendance: (await all("attendance")).map(a => ({ ...a, absent: !!a.absent, allocations: a.allocations ? JSON.parse(a.allocations) : null })),
-            attendanceConflicts: req.currentUser!.role === "administracion"
+            attendanceConflicts: req.currentUser!.role !== "produccion"
                 ? (await rows(`SELECT c.*,p.name AS personName,a.projectName AS currentProject,a.timeIn AS currentTimeIn,a.timeOut AS currentTimeOut,a.responsible AS currentResponsible,
             a.breakMinutes AS currentBreakMinutes,a.hours AS currentHours,a.overtime AS currentOvertime,a.bonus AS currentBonus,a.absent AS currentAbsent,
             a.allocations AS currentAllocations,a.note AS currentNote
