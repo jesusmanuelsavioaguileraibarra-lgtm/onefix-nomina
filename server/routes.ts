@@ -639,6 +639,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
             issue(res, e);
         }
     });
+    // Test-phase deletion: removes a payroll in any state (including approved or paid)
+    // and releases its tasks and deduction balances. A snapshot is kept in payroll_revisions.
+    app.delete("/api/payrolls/:id", allow("administracion", "gerencia"), async (req, res) => {
+        try {
+            const p = (await row("SELECT * FROM payrolls WHERE id=?", Number(req.params.id)));
+            if (!p)
+                throw new Error("La nómina no existe");
+            (await db.transaction(async () => {
+                const snapshot = (await payrollFull(p));
+                (await run("INSERT INTO payroll_revisions (originalId,weekStart,snapshot,withdrawnBy,withdrawnAt) VALUES (?,?,?,?,?)", p.id, p.weekStart, JSON.stringify(snapshot), req.currentUser!.id, new Date().toISOString()));
+                for (const l of (await rows("SELECT * FROM payroll_lines WHERE payrollId=?", p.id))) {
+                    for (const a of JSON.parse(l.allocations))
+                        (await run("UPDATE deductions SET applied=GREATEST(ROUND(applied-?,2),0) WHERE id=?", a.amount, a.deductionId));
+                    (await run(`DELETE FROM receipt_deliveries WHERE "lineId"=?`, l.id));
+                    (await run(`DELETE FROM payment_events WHERE "lineId"=?`, l.id));
+                }
+                (await run("UPDATE tasks SET payrollId=NULL WHERE payrollId=?", p.id));
+                (await run("DELETE FROM payroll_lines WHERE payrollId=?", p.id));
+                (await run("DELETE FROM payrolls WHERE id=?", p.id));
+            })());
+            (await audit(req.currentUser!.id, "payroll-delete", String(p.id)));
+            res.json({ ok: true });
+        }
+        catch (e) {
+            issue(res, e);
+        }
+    });
     app.post("/api/lines/:id/pay", allow("administracion"), async (req, res) => {
         try {
             const method = String(req.body.method || "").trim(), reference = String(req.body.reference || "").trim();

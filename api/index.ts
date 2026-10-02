@@ -1084,6 +1084,7 @@ function operationalPayrollWrite(method, path, actualRole) {
   const role = actualRole === "administracion" ? "gerencia" : actualRole;
   if (method === "DELETE" && role !== "administracion" && /^\/daily-pay\/\d+$/.test(path)) return true;
   if (method === "DELETE" && role !== "produccion" && /^\/contracts\/\d+$/.test(path)) return true;
+  if (method === "DELETE" && role !== "produccion" && /^\/payrolls\/\d+$/.test(path)) return true;
   if (method !== "POST") return false;
   if (role !== "produccion" && /^\/(?:projects|contracts|contracts\/\d+\/amend|lines\/\d+\/pay)$/.test(path))
     return true;
@@ -2416,6 +2417,30 @@ async function registerRoutes(httpServer, app) {
         await run("DELETE FROM payrolls WHERE id=?", p.id);
       })();
       await audit(req.currentUser.id, "payroll-withdraw", String(p.id));
+      res.json({ ok: true });
+    } catch (e) {
+      issue2(res, e);
+    }
+  });
+  app.delete("/api/payrolls/:id", allow("administracion", "gerencia"), async (req, res) => {
+    try {
+      const p = await row("SELECT * FROM payrolls WHERE id=?", Number(req.params.id));
+      if (!p)
+        throw new Error("La n\xF3mina no existe");
+      await db.transaction(async () => {
+        const snapshot2 = await payrollFull(p);
+        await run("INSERT INTO payroll_revisions (originalId,weekStart,snapshot,withdrawnBy,withdrawnAt) VALUES (?,?,?,?,?)", p.id, p.weekStart, JSON.stringify(snapshot2), req.currentUser.id, (/* @__PURE__ */ new Date()).toISOString());
+        for (const l of await rows("SELECT * FROM payroll_lines WHERE payrollId=?", p.id)) {
+          for (const a of JSON.parse(l.allocations))
+            await run("UPDATE deductions SET applied=GREATEST(ROUND(applied-?,2),0) WHERE id=?", a.amount, a.deductionId);
+          await run(`DELETE FROM receipt_deliveries WHERE "lineId"=?`, l.id);
+          await run(`DELETE FROM payment_events WHERE "lineId"=?`, l.id);
+        }
+        await run("UPDATE tasks SET payrollId=NULL WHERE payrollId=?", p.id);
+        await run("DELETE FROM payroll_lines WHERE payrollId=?", p.id);
+        await run("DELETE FROM payrolls WHERE id=?", p.id);
+      })();
+      await audit(req.currentUser.id, "payroll-delete", String(p.id));
       res.json({ ok: true });
     } catch (e) {
       issue2(res, e);

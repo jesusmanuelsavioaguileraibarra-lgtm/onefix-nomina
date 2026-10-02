@@ -454,6 +454,17 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
     } catch(e:any) { let text=e.message||"Error"; try{text=JSON.parse(text.slice(text.indexOf("{"))).error||text;}catch{} setError(text); }
     finally {setBusy(false);}
   }
+  async function removePayroll(payrollId:number,weekStart:string,paidLines:number) {
+    const warning=paidLines?` Tiene ${paidLines} pago(s) registrado(s) que también se borrarán.`:"";
+    if(!window.confirm(`¿Eliminar la nómina de la semana ${weekStart}?${warning} Las tareas y descuentos quedarán disponibles para una nueva nómina.`))return;
+    setBusy(true);setError("");setSuccess("");
+    try {
+      await apiRequest("DELETE",`/api/payrolls/${payrollId}`);
+      await queryClient.invalidateQueries({queryKey:["/api/state"]});
+      setSuccess("Nómina eliminada.");
+    } catch(e:any) { let text=e.message||"Error"; try{text=JSON.parse(text.slice(text.indexOf("{"))).error||text;}catch{} setError(text); }
+    finally {setBusy(false);}
+  }
   function open(type:Modal,value?:number) { setChosen(value ?? null);setError("");setSuccess("");if(type==="asistencia")setAttendanceVersions(Object.fromEntries(attendance.map(a=>[`${a.personId}:${a.date}`,a.revision ?? 1])));if(type==="persona"||type==="editarPersona")setPersonPayType(value ? people.find(p=>p.id===value)?.payType || "" : "");setModal(type); }
   function formSubmit(e:React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -637,7 +648,7 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
             {p.status==="borrador"&&admin?<label className="field"><span>Nota de revisión (opcional)</span><textarea maxLength={500} value={reviewNotes[p.id] ?? ""} onChange={e=>setReviewNotes(v=>({...v,[p.id]:e.target.value}))} placeholder="Observaciones sobre importes, descuentos o partidas" data-testid={`input-review-note-${p.id}`}/></label>:<div className="review-stamps"><span><b>Revisión</b> {p.reviewedAt?`${p.reviewer || "Revisión anterior"} · ${new Date(p.reviewedAt).toLocaleString("es-US")}`:"Pendiente de revisión"}</span><span><b>Gerencia</b> {p.approvedAt?`${p.approver || "Aprobación anterior"} · ${new Date(p.approvedAt).toLocaleString("es-US")}`:"Pendiente de aprobación"}</span>{p.note&&<span><b>Nota</b> {p.note}</span>}</div>}
             {manager&&p.status==="revisado"&&<label className="review-check manager-check"><input type="checkbox" checked={managerConfirmed===p.id} onChange={e=>setManagerConfirmed(e.target.checked?p.id:null)} data-testid={`check-confirm-payroll-${p.id}`}/><span>He comprobado las partidas y confirmo el total neto de {usd(p.lines.reduce((v,l)=>v+l.net,0))}.</span></label>}
           </div>
-          <div className="panel-footer"><div className="footer-links">{pdfLink(`/api/payrolls/${p.id}/pdf/lista`,"Listado PDF")}{pdfLink(`/api/payrolls/${p.id}/pdf/contable`,"Contable PDF")}</div><div className="footer-links">{admin&&p.status!=="aprobado"&&<button className="btn quiet" disabled={busy} onClick={()=>send(`/api/payrolls/${p.id}/withdraw`)}>Retirar para corregir</button>}{admin&&p.status==="borrador"&&<button className="btn primary" disabled={busy||!p.lines.length||p.lines.some(l=>!l.reviewed||(lineObservations[l.id]??l.observation)!==l.observation)} onClick={()=>send(`/api/payrolls/${p.id}/review`,{note:reviewNotes[p.id] ?? ""})} data-testid={`button-submit-review-${p.id}`}>Enviar revisión a Gerencia <Check size={16}/></button>}{manager&&p.status==="revisado"&&<button className="btn primary" disabled={busy||managerConfirmed!==p.id} onClick={()=>send(`/api/payrolls/${p.id}/approve`,{confirmed:true})} data-testid={`button-approve-payroll-${p.id}`}>Gerencia: aprobar <Check size={16}/></button>}</div></div>
+          <div className="panel-footer"><div className="footer-links">{pdfLink(`/api/payrolls/${p.id}/pdf/lista`,"Listado PDF")}{pdfLink(`/api/payrolls/${p.id}/pdf/contable`,"Contable PDF")}</div><div className="footer-links">{(admin||manager)&&<button className="btn quiet" disabled={busy} onClick={()=>removePayroll(p.id,p.weekStart,p.lines.filter(l=>l.paid).length)} data-testid={`button-delete-payroll-${p.id}`}>Eliminar nómina</button>}{admin&&p.status!=="aprobado"&&<button className="btn quiet" disabled={busy} onClick={()=>send(`/api/payrolls/${p.id}/withdraw`)}>Retirar para corregir</button>}{admin&&p.status==="borrador"&&<button className="btn primary" disabled={busy||!p.lines.length||p.lines.some(l=>!l.reviewed||(lineObservations[l.id]??l.observation)!==l.observation)} onClick={()=>send(`/api/payrolls/${p.id}/review`,{note:reviewNotes[p.id] ?? ""})} data-testid={`button-submit-review-${p.id}`}>Enviar revisión a Gerencia <Check size={16}/></button>}{manager&&p.status==="revisado"&&<button className="btn primary" disabled={busy||managerConfirmed!==p.id} onClick={()=>send(`/api/payrolls/${p.id}/approve`,{confirmed:true})} data-testid={`button-approve-payroll-${p.id}`}>Gerencia: aprobar <Check size={16}/></button>}</div></div>
           </section>)}</div>:<section className="panel"><Empty title="Sin cierres semanales" description="Cuando tengas asistencia o tareas confirmadas, selecciona un sábado y genera la nómina desde el domingo posterior al cierre."/></section>}</>}
         </div>
       </main>

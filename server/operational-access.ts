@@ -8,6 +8,8 @@ export function operationalPayrollWrite(method: string, path: string, actualRole
     && /^\/daily-pay\/\d+$/.test(path)) return true;
   if (method === "DELETE" && role !== "produccion"
     && /^\/contracts\/\d+$/.test(path)) return true;
+  if (method === "DELETE" && role !== "produccion"
+    && /^\/payrolls\/\d+$/.test(path)) return true;
   if (method !== "POST") return false;
   if (role !== "produccion" && /^\/(?:projects|contracts|contracts\/\d+\/amend|lines\/\d+\/pay)$/.test(path))
     return true;
