@@ -153,3 +153,4 @@
 /* Keep the mobile navigation dismissible when it covers the toolbar. */
 .sidebar-close{display:none}
 @media(max-width:760px){.sidebar-close{display:grid;place-items:center;align-self:flex-end;width:40px;height:40px;margin:-10px 0 8px;border:1px solid #665b50;border-radius:6px;background:transparent;color:#f8f3eb}}
+.contract-actions,.row-actions{display:flex;flex-wrap:wrap;gap:var(--space-2);align-items:center}.row-actions{gap:var(--space-3)}.danger-action{color:var(--color-error)!important}.btn.danger-action{border-color:var(--color-error)}.btn.danger-action:hover:not(:disabled){background:var(--color-error-highlight)}.danger-action:disabled{opacity:.5;cursor:not-allowed}

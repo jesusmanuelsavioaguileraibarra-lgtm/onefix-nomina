@@ -83,4 +83,14 @@ export function registerContractTracking(app: Express) {
       res.json(item);
     } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : "No se pudo guardar" }); }
   });
+  app.delete("/api/contract-tracking/:id", allow("administracion", "gerencia"), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: "Contrato inválido" });
+    try {
+      const deleted = await row(`DELETE FROM contract_tracking WHERE id=? RETURNING id`, id);
+      if (!deleted) return res.status(404).json({ error: "El contrato no existe" });
+      await audit(req.currentUser!.id, "contract_tracking_delete", String(id));
+      res.json({ ok: true });
+    } catch (error) { res.status(409).json({ error: error instanceof Error ? error.message : "No se pudo eliminar" }); }
+  });
 }

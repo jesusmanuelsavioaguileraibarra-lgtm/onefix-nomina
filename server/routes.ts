@@ -74,7 +74,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               && req.currentUser!.role !== "produccion")
             && !operationalPayrollWrite(req.method, req.path, req.currentUser!.role)
             && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path))
-            && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+            && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))
+            && !(req.method === "DELETE" && /^\/contract-tracking\/\d+$/.test(req.path))) {
             return res.status(423).json({ error: "Esta operación no está habilitada. Nómina y pagos solo se gestionan por Administración y Gerencia, según su etapa de aprobación." });
         }
         if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method)
@@ -86,7 +87,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
               && req.currentUser!.role !== "produccion")
             && !operationalPayrollWrite(req.method, req.path, req.currentUser!.role)
             && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path))
-            && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+            && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))
+            && !(req.method === "DELETE" && /^\/contract-tracking\/\d+$/.test(req.path))) {
             return res.status(423).json({ error: "La nómina y los pagos siguen bloqueados." });
         }
         next();
@@ -224,6 +226,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
                 (await run("INSERT INTO amendments (contractId,delta,note,date) VALUES (?,?,?,?)", id, delta, note, new Date().toISOString().slice(0, 10)));
             })());
             (await audit(req.currentUser!.id, "contract-amend", String(id)));
+            res.json({ ok: true });
+        }
+        catch (e) {
+            issue(res, e);
+        }
+    });
+    app.delete("/api/contracts/:id", allow("administracion"), async (req, res) => {
+        try {
+            const id = Number(req.params.id);
+            if (!Number.isSafeInteger(id) || id < 1)
+                throw new Error("Contrato inválido");
+            const c = (await row("SELECT id,number FROM contracts WHERE id=?", id));
+            if (!c)
+                throw new Error("El contrato no existe");
+            // Approved or paid tasks are part of payroll history; deleting their contract would rewrite it.
+            const locked = (await row("SELECT id FROM tasks WHERE contractId=? AND (approved=1 OR payrollId IS NOT NULL) LIMIT 1", id));
+            if (locked)
+                throw new Error(`El contrato #${c.number} tiene tareas aprobadas o incluidas en nómina; no se puede eliminar sin alterar el historial de pagos`);
+            (await db.transaction(async () => {
+                (await run("UPDATE tasks SET contractId=NULL WHERE contractId=?", id));
+                (await run("DELETE FROM amendments WHERE contractId=?", id));
+                (await run("DELETE FROM contracts WHERE id=?", id));
+            })());
+            (await audit(req.currentUser!.id, "contract-delete", `${id}:${c.number}`));
             res.json({ ok: true });
         }
         catch (e) {

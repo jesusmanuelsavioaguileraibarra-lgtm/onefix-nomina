@@ -1,5 +1,5 @@
 /** A payroll period runs Saturday through the following Friday.
- * It can be submitted starting on the Sunday after that Friday. */
+ * It can be generated on any day, including before the period ends. */
 export function payrollPeriod(start:string) {
   const saturday = new Date(`${start}T12:00:00Z`);
   if (!/^\d{4}-\d{2}-\d{2}$/.test(start) ||
@@ -9,19 +9,14 @@ export function payrollPeriod(start:string) {
     throw new Error("El inicio debe ser un sábado válido");
   const end = new Date(saturday);
   end.setUTCDate(end.getUTCDate() + 6);
-  const ready = new Date(saturday);
-  ready.setUTCDate(ready.getUTCDate() + 8);
-  return { weekStart:start, weekEnd:end.toISOString().slice(0,10), availableOn:ready.toISOString().slice(0,10) };
+  return { weekStart:start, weekEnd:end.toISOString().slice(0,10) };
 }
 
+/** Saturday of the most recent period that ends on or before today
+ * (on a Friday this is the current week). */
 export function latestReadySaturday(today:string) {
   const date = new Date(`${today}T12:00:00Z`);
   if(Number.isNaN(date.getTime())) throw new Error("Fecha actual inválida");
-  date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 1) % 7) - 7);
-  let candidate = date.toISOString().slice(0,10);
-  if (payrollPeriod(candidate).availableOn > today) {
-    date.setUTCDate(date.getUTCDate() - 7);
-    candidate = date.toISOString().slice(0,10);
-  }
-  return candidate;
+  date.setUTCDate(date.getUTCDate() - ((date.getUTCDay() + 2) % 7) - 6);
+  return date.toISOString().slice(0,10);
 }

@@ -76,10 +76,7 @@ export const payrollFull = async (p: any) => ({
         attendanceSnapshot: l.attendanceSnapshot === null ? null : JSON.parse(l.attendanceSnapshot) })),
 });
 async function preparePayroll(weekStart: string) {
-    const { weekEnd: end, availableOn } = payrollPeriod(weekStart);
-    const todayInFlorida = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-    if (todayInFlorida < availableOn)
-        throw new Error(`La nómina del ${weekStart} al ${end} se genera desde el domingo ${availableOn}`);
+    const { weekEnd: end } = payrollPeriod(weekStart);
         if ((await row("SELECT id FROM payrolls WHERE weekStart=?", weekStart)))
             throw new Error("Esta semana ya tiene una nómina");
         const overlap = (await row("SELECT id,weekStart,weekEnd FROM payrolls WHERE weekStart<=? AND weekEnd>=? LIMIT 1", end, weekStart));
@@ -198,14 +195,14 @@ async function preparePayroll(weekStart: string) {
         }
         if (!prepared.length)
             throw new Error("No hay conceptos para esta semana. Registra asistencia o tareas aprobadas");
-        return { end, availableOn, prepared, taskIds, warnings };
+        return { end, prepared, taskIds, warnings };
 }
 export async function previewPayroll(weekStart: string) {
-    const { weekEnd, availableOn } = payrollPeriod(weekStart);
+    const { weekEnd } = payrollPeriod(weekStart);
     try {
         const { prepared, warnings } = await preparePayroll(weekStart);
         return {
-            weekStart, weekEnd, availableOn, ready: true, blockers: [] as string[], warnings,
+            weekStart, weekEnd, ready: true, blockers: [] as string[], warnings,
             lines: prepared.map(p => ({
                 personId: p.person.id, personName: p.person.name, kind: p.person.kind,
                 gross: p.gross, deductions: p.deductions, net: p.net,
@@ -223,7 +220,7 @@ export async function previewPayroll(weekStart: string) {
         // must remain failures so the client cannot mistake them for a valid preview.
         if (!(error instanceof Error) || !/^(La nómina del|Esta semana|Este período|Administración debe|El jornal de|Falta tarifa|Descuentos de|No hay conceptos)/.test(error.message))
             throw error;
-        return { weekStart, weekEnd, availableOn, ready: false, blockers: [error.message], warnings: [],
+        return { weekStart, weekEnd, ready: false, blockers: [error.message], warnings: [],
             lines: [], totals: { gross: 0, deductions: 0, net: 0 } };
     }
 }

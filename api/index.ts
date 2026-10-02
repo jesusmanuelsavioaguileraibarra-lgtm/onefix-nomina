@@ -120,9 +120,7 @@ function payrollPeriod(start) {
     throw new Error("El inicio debe ser un s\xE1bado v\xE1lido");
   const end = new Date(saturday);
   end.setUTCDate(end.getUTCDate() + 6);
-  const ready = new Date(saturday);
-  ready.setUTCDate(ready.getUTCDate() + 8);
-  return { weekStart: start, weekEnd: end.toISOString().slice(0, 10), availableOn: ready.toISOString().slice(0, 10) };
+  return { weekStart: start, weekEnd: end.toISOString().slice(0, 10) };
 }
 
 // shared/activation.ts
@@ -422,10 +420,7 @@ var payrollFull = async (p) => ({
   }))
 });
 async function preparePayroll(weekStart) {
-  const { weekEnd: end, availableOn } = payrollPeriod(weekStart);
-  const todayInFlorida = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" }).format(/* @__PURE__ */ new Date());
-  if (todayInFlorida < availableOn)
-    throw new Error(`La n\xF3mina del ${weekStart} al ${end} se genera desde el domingo ${availableOn}`);
+  const { weekEnd: end } = payrollPeriod(weekStart);
   if (await row("SELECT id FROM payrolls WHERE weekStart=?", weekStart))
     throw new Error("Esta semana ya tiene una n\xF3mina");
   const overlap = await row("SELECT id,weekStart,weekEnd FROM payrolls WHERE weekStart<=? AND weekEnd>=? LIMIT 1", end, weekStart);
@@ -545,16 +540,15 @@ async function preparePayroll(weekStart) {
   }
   if (!prepared.length)
     throw new Error("No hay conceptos para esta semana. Registra asistencia o tareas aprobadas");
-  return { end, availableOn, prepared, taskIds, warnings };
+  return { end, prepared, taskIds, warnings };
 }
 async function previewPayroll(weekStart) {
-  const { weekEnd, availableOn } = payrollPeriod(weekStart);
+  const { weekEnd } = payrollPeriod(weekStart);
   try {
     const { prepared, warnings } = await preparePayroll(weekStart);
     return {
       weekStart,
       weekEnd,
-      availableOn,
       ready: true,
       blockers: [],
       warnings,
@@ -580,7 +574,6 @@ async function previewPayroll(weekStart) {
     return {
       weekStart,
       weekEnd,
-      availableOn,
       ready: false,
       blockers: [error.message],
       warnings: [],
@@ -1011,6 +1004,18 @@ function registerContractTracking(app) {
       res.status(409).json({ error: error instanceof Error ? error.message : "No se pudo guardar" });
     }
   });
+  app.delete("/api/contract-tracking/:id", allow("administracion", "gerencia"), async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id < 1) return res.status(400).json({ error: "Contrato inv\xE1lido" });
+    try {
+      const deleted = await row(`DELETE FROM contract_tracking WHERE id=? RETURNING id`, id);
+      if (!deleted) return res.status(404).json({ error: "El contrato no existe" });
+      await audit(req.currentUser.id, "contract_tracking_delete", String(id));
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(409).json({ error: error instanceof Error ? error.message : "No se pudo eliminar" });
+    }
+  });
 }
 
 // server/receivables.ts
@@ -1076,6 +1081,7 @@ function registerReceivables(app) {
 // server/operational-access.ts
 function operationalPayrollWrite(method, path, role) {
   if (method === "DELETE" && role !== "administracion" && /^\/daily-pay\/\d+$/.test(path)) return true;
+  if (method === "DELETE" && role !== "produccion" && /^\/contracts\/\d+$/.test(path)) return true;
   if (method !== "POST") return false;
   if (role !== "produccion" && /^\/(?:projects|contracts|contracts\/\d+\/amend|lines\/\d+\/pay)$/.test(path))
     return true;
@@ -1890,10 +1896,10 @@ async function registerRoutes(httpServer, app) {
     return requireAuth(req, res, next);
   });
   app.use("/api", (req, res, next) => {
-    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path) && req.currentUser.role !== "produccion") && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (process.env.NODE_ENV === "production" && process.env.ONEFIX_DEMO_ACCESS !== "1" && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(req.method === "POST" && /^\/people(?:\/\d+)?$/.test(req.path)) && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path) && req.currentUser.role !== "produccion") && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path)) && !(req.method === "DELETE" && /^\/contract-tracking\/\d+$/.test(req.path))) {
       return res.status(423).json({ error: "Esta operaci\xF3n no est\xE1 habilitada. N\xF3mina y pagos solo se gestionan por Administraci\xF3n y Gerencia, seg\xFAn su etapa de aprobaci\xF3n." });
     }
-    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path) && req.currentUser.role !== "produccion") && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path))) {
+    if (initialLoadOnly() && !["GET", "HEAD", "OPTIONS"].includes(req.method) && !(/^\/people(?:\/\d+)?$/.test(req.path) && req.method === "POST") && !(req.method === "POST" && /^\/attendance(?:\/conflicts(?:\/[a-f0-9-]{36}\/resolve)?)?$/.test(req.path)) && !(req.method === "PATCH" && /^\/receivables\/\d+\/due-date$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/sales\/(?:clients(?:\/\d+)?|estimates(?:\/\d+(?:\/status)?)?)$/.test(req.path) && req.currentUser.role !== "produccion") && !operationalPayrollWrite(req.method, req.path, req.currentUser.role) && !(req.method === "POST" && /^\/receipt-deliveries\/\d+\/(?:retry|resolve)$/.test(req.path)) && !((req.method === "POST" || req.method === "PATCH") && /^\/contract-tracking(?:\/\d+)?$/.test(req.path)) && !(req.method === "DELETE" && /^\/contract-tracking\/\d+$/.test(req.path))) {
       return res.status(423).json({ error: "La n\xF3mina y los pagos siguen bloqueados." });
     }
     next();
@@ -2025,6 +2031,28 @@ async function registerRoutes(httpServer, app) {
         await run("INSERT INTO amendments (contractId,delta,note,date) VALUES (?,?,?,?)", id, delta, note, (/* @__PURE__ */ new Date()).toISOString().slice(0, 10));
       })();
       await audit(req.currentUser.id, "contract-amend", String(id));
+      res.json({ ok: true });
+    } catch (e) {
+      issue2(res, e);
+    }
+  });
+  app.delete("/api/contracts/:id", allow("administracion"), async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isSafeInteger(id) || id < 1)
+        throw new Error("Contrato inv\xE1lido");
+      const c = await row("SELECT id,number FROM contracts WHERE id=?", id);
+      if (!c)
+        throw new Error("El contrato no existe");
+      const locked = await row("SELECT id FROM tasks WHERE contractId=? AND (approved=1 OR payrollId IS NOT NULL) LIMIT 1", id);
+      if (locked)
+        throw new Error(`El contrato #${c.number} tiene tareas aprobadas o incluidas en n\xF3mina; no se puede eliminar sin alterar el historial de pagos`);
+      await db.transaction(async () => {
+        await run("UPDATE tasks SET contractId=NULL WHERE contractId=?", id);
+        await run("DELETE FROM amendments WHERE contractId=?", id);
+        await run("DELETE FROM contracts WHERE id=?", id);
+      })();
+      await audit(req.currentUser.id, "contract-delete", `${id}:${c.number}`);
       res.json({ ok: true });
     } catch (e) {
       issue2(res, e);

@@ -46,7 +46,18 @@ export default function ContractTracking({admin,offline}:{admin:boolean;offline:
     } catch(err) {setError(err instanceof Error?err.message:"No se pudo guardar");}
     finally {setBusy(false);}
   }
+  async function remove(c:Contract) {
+    if(!window.confirm(`¿Eliminar el contrato ${c.number||"sin número"} (${c.project})? Esta acción no se puede deshacer.`)) return;
+    setBusy(true);setError("");setMessage("");
+    try {
+      await apiRequest("DELETE",`/api/contract-tracking/${c.id}`);
+      await queryClient.invalidateQueries({queryKey:["contract-tracking"]});
+      setMessage("Contrato eliminado del registro.");
+    } catch(err) {setMessage("");setError(err instanceof Error?err.message:"No se pudo eliminar");}
+    finally {setBusy(false);}
+  }
   return <div className="tracking" data-testid="contract-tracking">
+    {error&&!formOpen&&<div className="feedback error" role="alert">{error}</div>}
     <div className="tracking-intro"><div><span className="eyebrow">REGISTRO PRIVADO · USD</span>
       <h2>Libro de contratos</h2><p>Valor contratado, abonado o descontado y saldo pendiente por obra y subcontratista.</p></div>
       {admin&&<button className="btn primary" disabled={offline} onClick={()=>{setEditing(null);setFormOpen(true);setError("");}}>Nuevo contrato</button>}
@@ -58,7 +69,7 @@ export default function ContractTracking({admin,offline}:{admin:boolean;offline:
     {!offline&&<><div className="tracking-filters"><label className="field"><span>Buscar número, obra, persona o trabajo</span><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar contratos" data-testid="tracking-search"/></label><label className="check-field"><input type="checkbox" checked={showReview} onChange={e=>setShowReview(e.target.checked)}/> Solo por verificar</label></div>
       <div className="tracking-metrics"><div><span>Contratos visibles</span><b>{visible.length}</b></div><div><span>Valor</span><b>{money(sum("valueCents"))}</b></div><div><span>Abonado / Desc.</span><b>{money(sum("appliedCents"))}</b></div><div><span>Saldo</span><b>{money(sum("valueCents")-sum("appliedCents"))}</b></div></div>
       <section className="panel"><div className="panel-head"><div><h2>Contratos y observaciones</h2><p>{records.filter(c=>c.needsReview).length} por verificar · El número original puede estar vacío o repetido, con revisión obligatoria.</p></div></div>
-        {isLoading?<div className="empty">Cargando registro privado…</div>:visible.length?<div className="table-wrap"><table><thead><tr><th>No.</th><th>Proyecto / Job</th><th>Subcontratista</th><th>Trabajo</th><th>Valor</th><th>Abonado / Desc.</th><th>Saldo</th><th>Estado</th><th>Observación</th>{admin&&<th>Acción</th>}</tr></thead><tbody>{visible.map(c=><tr key={c.id} data-testid={`tracking-row-${c.id}`}><td>{c.number||"Sin número"}</td><td><b>{c.project}</b></td><td>{c.subcontractor}</td><td>{c.work}</td><td>{money(c.valueCents)}</td><td>{money(c.appliedCents)}</td><td><b>{money(c.valueCents-c.appliedCents)}</b></td><td>{c.status}{c.needsReview&&<small className="tracking-flag">Por verificar</small>}</td><td className="details">{c.note||"—"}</td>{admin&&<td><button className="table-action" onClick={()=>{setEditing(c);setFormOpen(true);setError("");}}>Editar</button></td>}</tr>)}</tbody></table></div>:<div className="empty"><h3>Sin contratos en este filtro</h3><p>{records.length?"Prueba otra búsqueda o desactiva «Solo por verificar».":"El registro está vacío. Administración o Gerencia pueden cargar contratos tras revisar los números y saldos del Excel consolidado."}</p></div>}</section>
+        {isLoading?<div className="empty">Cargando registro privado…</div>:visible.length?<div className="table-wrap"><table><thead><tr><th>No.</th><th>Proyecto / Job</th><th>Subcontratista</th><th>Trabajo</th><th>Valor</th><th>Abonado / Desc.</th><th>Saldo</th><th>Estado</th><th>Observación</th>{admin&&<th>Acción</th>}</tr></thead><tbody>{visible.map(c=><tr key={c.id} data-testid={`tracking-row-${c.id}`}><td>{c.number||"Sin número"}</td><td><b>{c.project}</b></td><td>{c.subcontractor}</td><td>{c.work}</td><td>{money(c.valueCents)}</td><td>{money(c.appliedCents)}</td><td><b>{money(c.valueCents-c.appliedCents)}</b></td><td>{c.status}{c.needsReview&&<small className="tracking-flag">Por verificar</small>}</td><td className="details">{c.note||"—"}</td>{admin&&<td><div className="row-actions"><button className="table-action" onClick={()=>{setEditing(c);setFormOpen(true);setError("");}}>Editar</button><button className="table-action danger-action" disabled={busy} onClick={()=>remove(c)} data-testid={`button-delete-tracking-${c.id}`}>Eliminar</button></div></td>}</tr>)}</tbody></table></div>:<div className="empty"><h3>Sin contratos en este filtro</h3><p>{records.length?"Prueba otra búsqueda o desactiva «Solo por verificar».":"El registro está vacío. Administración o Gerencia pueden cargar contratos tras revisar los números y saldos del Excel consolidado."}</p></div>}</section>
     </>}
     {formOpen&&admin&&<div className="overlay" role="presentation" onMouseDown={e=>{if(e.target===e.currentTarget)setFormOpen(false);}}><div className="dialog" role="dialog" aria-modal="true" aria-label={editing?"Editar contrato":"Nuevo contrato"}>
       <div className="dialog-head"><div><span className="eyebrow">SEGUIMIENTO PRIVADO</span><h2>{editing?"Editar contrato":"Nuevo contrato"}</h2></div><button className="icon-button" onClick={()=>setFormOpen(false)} aria-label="Cerrar">×</button></div>
