@@ -2,7 +2,8 @@ import type { Role } from "./auth";
 
 // Explicit production write allowlist. Route handlers enforce the narrower
 // role permissions and payroll-state checks afterwards.
-export function operationalPayrollWrite(method: string, path: string, role: Role): boolean {
+export function operationalPayrollWrite(method: string, path: string, actualRole: Role): boolean {
+  const role = (actualRole === "administracion" ? "gerencia" : actualRole) as Role;
   if (method === "DELETE" && role !== "administracion"
     && /^\/daily-pay\/\d+$/.test(path)) return true;
   if (method === "DELETE" && role !== "produccion"

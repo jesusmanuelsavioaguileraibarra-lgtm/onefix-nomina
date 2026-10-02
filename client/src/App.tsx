@@ -252,7 +252,7 @@ function AuthGate() {
 }
 function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning}:{user:User;onLogout:()=>Promise<void>;offlineSession:boolean;personnelIntake:boolean;localCacheWarning:string}) {
   const loadingDay = initialLoadOnly();
-  const [tab,setTab] = useState<Tab>(offlineSession ? "produccion" : personnelIntake ? user.role==="gerencia"?"accesos":user.role==="produccion"?"produccion":"personas" : loadingDay && user.role!=="gerencia" ? "personas" :user.role==="produccion"?"produccion":"inicio");
+  const [tab,setTab] = useState<Tab>(offlineSession ? "produccion" : personnelIntake ? user.role!=="produccion"?"accesos":"produccion" : loadingDay && user.role==="produccion" ? "personas" :user.role==="produccion"?"produccion":"inicio");
   const [modal,setModal] = useState<Modal>(null);
   const [chosen,setChosen] = useState<number|null>(null);
   const [personPayType,setPersonPayType] = useState("");
@@ -276,7 +276,7 @@ function AppBody({user,onLogout,offlineSession,personnelIntake,localCacheWarning
   const [attendanceQueue,setAttendanceQueue]=useState<QueuedAttendance[]>([]);
   const syncingAttendance=useRef(false);
   const [attendanceVersions,setAttendanceVersions]=useState<Record<string,number>>({});
-  const production=user.role==="produccion",manager=user.role==="gerencia";
+  const production=user.role==="produccion",manager=user.role==="gerencia"||user.role==="administracion";
   const admin=user.role==="administracion"||manager;
   const canProduce=production||manager;
   const dueQuery=useQuery<DueInvoice[]>({

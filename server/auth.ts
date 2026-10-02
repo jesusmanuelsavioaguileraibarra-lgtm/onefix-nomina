@@ -104,11 +104,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 }
 export function allow(...roles: Role[]) {
     return (req: Request, res: Response, next: NextFunction) => {
-        // Gerencia inherits the operational permissions of both other areas.
-        // Production and Administration remain limited to their own roles.
-        if (!req.currentUser || !(roles.includes(req.currentUser.role)
-            || (req.currentUser.role === "gerencia"
-                && (roles.includes("administracion") || roles.includes("produccion")))))
+        // Gerencia and Administración share full permissions, including those of Producción.
+        // Producción remains limited to its own role.
+        const fullAccess = req.currentUser?.role === "gerencia" || req.currentUser?.role === "administracion";
+        if (!req.currentUser || !(roles.includes(req.currentUser.role) || fullAccess))
             return issue(res, "Tu rol no permite esta acción", 403);
         next();
     };

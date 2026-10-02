@@ -682,7 +682,8 @@ async function requireAuth(req, res, next) {
 }
 function allow(...roles) {
   return (req, res, next) => {
-    if (!req.currentUser || !(roles.includes(req.currentUser.role) || req.currentUser.role === "gerencia" && (roles.includes("administracion") || roles.includes("produccion"))))
+    const fullAccess = req.currentUser?.role === "gerencia" || req.currentUser?.role === "administracion";
+    if (!req.currentUser || !(roles.includes(req.currentUser.role) || fullAccess))
       return issue(res, "Tu rol no permite esta acci\xF3n", 403);
     next();
   };
@@ -1079,7 +1080,8 @@ function registerReceivables(app) {
 }
 
 // server/operational-access.ts
-function operationalPayrollWrite(method, path, role) {
+function operationalPayrollWrite(method, path, actualRole) {
+  const role = actualRole === "administracion" ? "gerencia" : actualRole;
   if (method === "DELETE" && role !== "administracion" && /^\/daily-pay\/\d+$/.test(path)) return true;
   if (method === "DELETE" && role !== "produccion" && /^\/contracts\/\d+$/.test(path)) return true;
   if (method !== "POST") return false;
