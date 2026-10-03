@@ -133,22 +133,24 @@ function Empty({title,description,action,onClick}:any) {
   return <div className="empty"><FileText size={31} strokeWidth={1.4}/><h3>{title}</h3><p>{description}</p>{action && <button className="btn primary" onClick={onClick}>{action}<ArrowRight size={15}/></button>}</div>;
 }
 function Badge({value}: {value:string}) { return <span className={`badge ${value === "aprobado" || value === "Pagado" ? "good":value === "revisado" || value === "Pendiente" ? "warm":""}`}>{value}</span>; }
+// Producción, Administración y Gerencia pueden usar la copia local cifrada (asistencia sin conexión).
+const offlineRole=(role?:string)=>role==="produccion"||role==="administracion"||role==="gerencia";
 function AuthGate() {
   const {data:session,isLoading,isError:sessionError,refetch}=useQuery<{user:User;offline?:boolean}|null>({queryKey:["/api/auth/me"],refetchInterval:60000,refetchOnWindowFocus:true,queryFn:async()=>{
-    if(!navigator.onLine){const saved=await loadLocal<{user:User;savedAt:string}>("session").catch(()=>undefined);if((saved?.user?.role==="produccion"||saved?.user?.role==="gerencia")&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000)return {...saved,offline:true};throw new Error("Sin conexión y sin sesión local válida");}
+    if(!navigator.onLine){const saved=await loadLocal<{user:User;savedAt:string}>("session").catch(()=>undefined);if((offlineRole(saved?.user?.role))&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000)return {...saved,offline:true};throw new Error("Sin conexión y sin sesión local válida");}
     try{return await (await apiRequest("GET","/api/auth/me")).json();}
     catch(e){
       if(String(e).startsWith("Error: 401:"))return null;
-      if(!navigator.onLine){const saved=await loadLocal<{user:User;savedAt:string}>("session").catch(()=>undefined);if((saved?.user?.role==="produccion"||saved?.user?.role==="gerencia")&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000)return {...saved,offline:true};}
+      if(!navigator.onLine){const saved=await loadLocal<{user:User;savedAt:string}>("session").catch(()=>undefined);if((offlineRole(saved?.user?.role))&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000)return {...saved,offline:true};}
       throw e;
     }
   }});
   const {data:status,isError:statusError,refetch:retryStatus}=useQuery<{hasUsers:boolean;setupAvailable:boolean;demoAccess:boolean;demoRoles:User["role"][];personnelIntake?:boolean}>({queryKey:["/api/auth/status"],queryFn:async()=>{
-    if(!navigator.onLine && await loadLocal<{user:User;savedAt:string}>("session").then(saved=>(saved?.user?.role==="produccion"||saved?.user?.role==="gerencia")&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000).catch(()=>false))
+    if(!navigator.onLine && await loadLocal<{user:User;savedAt:string}>("session").then(saved=>(offlineRole(saved?.user?.role))&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000).catch(()=>false))
       return {hasUsers:true,setupAvailable:false,demoAccess:false,demoRoles:[],personnelIntake:true};
     try{return await (await apiRequest("GET","/api/auth/status")).json();}
     catch(e){
-      if(!navigator.onLine && await loadLocal<{user:User;savedAt:string}>("session").then(saved=>(saved?.user?.role==="produccion"||saved?.user?.role==="gerencia")&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000).catch(()=>false))
+      if(!navigator.onLine && await loadLocal<{user:User;savedAt:string}>("session").then(saved=>(offlineRole(saved?.user?.role))&&Date.now()-Date.parse(saved.savedAt)<7*24*60*60_000).catch(()=>false))
         return {hasUsers:true,setupAvailable:false,demoAccess:false,demoRoles:[],personnelIntake:true};
       throw e;
     }
@@ -181,7 +183,7 @@ function AuthGate() {
         : {username:f.get("username"),password:f.get("password"),...(url.endsWith("setup")?{setupToken:f.get("setupToken")}:{})});
       const result=await response.json();
       setAuthToken(result.token);
-      if(result.user.role==="produccion"||result.user.role==="gerencia") {
+      if(offlineRole(result.user.role)) {
         try {
           await unlockOffline(result.user.id,String(f.get("password")),true);
           await saveLocal("session",{user:result.user,savedAt:new Date().toISOString()});
@@ -220,7 +222,7 @@ function AuthGate() {
   if (isLoading) return <div className="auth-page"><div className="auth-card"><p>Cargando acceso seguro…</p></div></div>;
   if (sessionError || statusError) return <div className="auth-page"><div className="auth-card"><h1>Sin conexión al servidor</h1><p>La carga de empleados requiere conexión. Si ya activaste la copia local de Producción, desconecta el dispositivo y reintenta para registrar asistencia.</p><button className="btn primary wide" type="button" onClick={()=>{refetch();retryStatus();}}>Reintentar conexión</button></div></div>;
   if (!status) return <div className="auth-page"><div className="auth-card"><p>Verificando el modo de operación…</p></div></div>;
-  if((session?.user?.role==="produccion"||session?.user?.role==="gerencia") && (!unlocked || (session.offline&&!offlineUnlocked(session.user.id))))
+  if((offlineRole(session?.user?.role)) && (!unlocked || (session.offline&&!offlineUnlocked(session.user.id))))
     return <div className="auth-page"><section className="auth-card"><h1>Desbloquear asistencia local</h1><p>{session.offline?"Sin conexión. Ingresa tu contraseña personal para abrir la copia cifrada de este dispositivo.":"Ingresa tu contraseña para habilitar la copia local de asistencia."}</p><form onSubmit={unlockSession}><Field label="Contraseña personal" name="pin" type="password" required minLength={status.personnelIntake?12:4}/>{error&&<div className="feedback error" role="alert">{error}</div>}<button className="btn primary wide" disabled={busy}>{busy?"Comprobando…":"Desbloquear"}</button></form><small>La copia local solo incluye nombres mínimos y asistencia. Se cifra en este dispositivo; nómina y pagos permanecen bloqueados.</small></section></div>;
   if(session?.user) return <AppBody user={session.user} personnelIntake={!!status?.personnelIntake} offlineSession={!!session.offline} localCacheWarning={localCacheWarning} onLogout={async()=>{if(navigator.onLine)await apiRequest("POST","/api/auth/logout").catch(()=>{});await removeLocal("session").catch(()=>{});lockOffline();setUnlocked(false);setAuthToken("");queryClient.clear();await refetch();}}/>;
   return <div className="auth-page"><section className="auth-card">
