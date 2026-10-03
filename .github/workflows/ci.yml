@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      # api/index.ts es generado por script/build.ts y es lo que ejecuta Vercel.
+      - name: Verificar que api/index.ts está actualizado
+        run: git diff --exit-code -- api/index.ts || (echo "::error::Ejecuta npm run build y sube api/index.ts" && exit 1)
